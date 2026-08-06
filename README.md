@@ -13,9 +13,20 @@ profiles/     the inputs. Each JSON file fully determines one dataset.
 data/         the outputs. One directory per profile run.
   small/        250,869 rows,      22 MB,  63 files
   full/      42,738,899 rows,     3.7 GB, 441 files
-tools/        REFERENCE SNAPSHOT of the generator and loader source. See the warning below.
+tools/        REFERENCE SNAPSHOT of the four .NET tools. See the warning below.
+  Cmms.LoadDataGenerator/   produces an artifact, opens no database
+  Cmms.LoadDataRunner/      bulk-copies an artifact into one tenant database
+  Cmms.MigrationRunner/     applies EF migrations, which the loader requires to be current
+  Cmms.TenantSeedRunner/    demo seed, and the ensureAdmin recovery after a clear
+scripts/      REFERENCE SNAPSHOT of the operator scripts, and the order to run them in.
+infra/        the Bicep that stands up the load, migrate and seed jobs and the artifact store.
+tests/        the Azure-free conformance suite over the delivery chain.
 docs/         how to regenerate, and how to load.
 ```
+
+The whole chain is here, but only `profiles/` and `data/` are authoritative. Everything under `tools/`,
+`scripts/`, `infra/` and `tests/` is a copy taken from `cmms`, for reading. `scripts/README.md` covers the
+running order and why it is not optional.
 
 ## Two things to know before you rely on this
 
