@@ -1,7 +1,7 @@
 # Artifact chunks are gzipped JSON Lines and are large: the full run is 3.7 GB across 441 files, with the
-# biggest single chunk at 13 MB. Git stores binary blobs whole per revision, so committing these directly
-# would make every future clone pay for every past regeneration. LFS keeps the working tree usable.
-*.jsonl.gz filter=lfs diff=lfs merge=lfs -text
+# biggest single chunk at 13 MB. They are not committed at all — see .gitignore — because generation is a
+# pure function of the profile, so the bytes are recoverable and the history cost is not.
+*.jsonl.gz binary
 
 # Everything else is text and should diff normally.
 *.json text

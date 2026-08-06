@@ -1,8 +1,9 @@
 # Regenerating a dataset
 
-Both datasets in `data/` were produced by `tools/Cmms.LoadDataGenerator` in the `cmms` repository. The
-generator opens no database and reads no Azure configuration, so it runs on a laptop with only the .NET 8
-SDK. That is deliberate, and it is why generating and loading are separate steps.
+`data/` is not committed, so this is not an optional maintenance chore: it is how you get a dataset at all.
+The datasets are produced by `tools/Cmms.LoadDataGenerator` in the `cmms` repository. The generator opens no
+database and reads no Azure configuration, so it runs on a laptop with only the .NET 8 SDK. That is
+deliberate, and it is why generating and loading are separate steps.
 
 ## The commands
 

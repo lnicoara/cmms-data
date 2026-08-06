@@ -10,7 +10,7 @@ deployed.
 
 ```
 profiles/     the inputs. Each JSON file fully determines one dataset.
-data/         the outputs. One directory per profile run.
+data/         the outputs. NOT COMMITTED — generated locally, one directory per profile run.
   small/        250,869 rows,      22 MB,  63 files
   full/      42,738,899 rows,     3.7 GB, 441 files
 tools/        REFERENCE SNAPSHOT of the four .NET tools. See the warning below.
@@ -24,9 +24,10 @@ tests/        the Azure-free conformance suite over the delivery chain.
 docs/         how to regenerate, and how to load.
 ```
 
-The whole chain is here, but only `profiles/` and `data/` are authoritative. Everything under `tools/`,
-`scripts/`, `infra/` and `tests/` is a copy taken from `cmms`, for reading. `scripts/README.md` covers the
-running order and why it is not optional.
+The whole chain is here, but only `profiles/` is authoritative — it is the only thing committed that cannot
+be derived from something else. `data/` is generated, ignored by Git, and always reproducible from a
+profile. Everything under `tools/`, `scripts/`, `infra/` and `tests/` is a copy taken from `cmms`, for
+reading. `scripts/README.md` covers the running order and why it is not optional.
 
 ## Two things to know before you rely on this
 
@@ -89,19 +90,25 @@ chunk-presence probe is a bare primary-key lookup, so it would classify the full
 small one's, adopt them, and write checkpoints that neither the checkpoint store nor the target cleaner can
 delete. That poisons the artifact permanently against that database.
 
-## Git LFS
+## `data/` is not committed
 
-`*.jsonl.gz` is tracked by LFS (see `.gitattributes`). Clone with LFS installed or `data/` arrives as
-pointer files:
+A fresh clone has no `data/` at all. It is in `.gitignore`, and you produce it locally by running the
+generator against a profile — see `docs/regenerate.md`.
+
+That follows from the first of the two things above. Generation is a pure function of the profile, so the
+bytes are recoverable at any time from `profiles/` plus a `cmms` checkout, and 3.7 GB of recoverable bytes
+is not worth the history. Git stores binary blobs whole per revision, so committing them directly would make
+every future clone pay for every past regeneration; LFS moves that cost to metered storage and bandwidth
+rather than removing it. Either way the repository would be paying to host something a fifteen-second
+command reproduces exactly.
+
+The consequence to plan around: the full run takes about an hour to regenerate, and nothing in this
+repository will tell you that your local `data/full/` is stale. Check the seed and row count in the manifest
+before you trust a dataset you did not just generate.
 
 ```bash
-git lfs install
-git clone <this repo>
+python3 -c "import json;d=json.load(open('data/small/manifest.json'));print(d['seed'], d['totalRows'])"
 ```
-
-The full dataset alone is 3.7 GB. If this repository is ever pushed to GitHub, note that LFS storage and
-bandwidth are metered, with a small free tier. Regenerating from `profiles/full.json` is free and gives a
-byte-identical result, so hosting the full dataset is a convenience rather than a necessity.
 
 ## See also
 

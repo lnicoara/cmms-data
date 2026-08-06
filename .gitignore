@@ -2,7 +2,9 @@
 bin/
 obj/
 
-# Scratch regeneration output. Datasets belong in data/<profile>/ and are committed deliberately,
-# never picked up incidentally by a `git add .`.
+# Generator output, scratch or otherwise. No dataset is committed: generation is a pure function of the
+# profile, so `profiles/` plus a `cmms` checkout reproduces `data/` byte for byte, and carrying 3.7 GB of
+# recoverable bytes in history would make every future clone pay for every past regeneration.
 artifact/
 artifact-*/
+data/
