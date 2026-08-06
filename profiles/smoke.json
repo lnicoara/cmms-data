@@ -1,0 +1,16 @@
+{
+  "Seed": "cmms-loadtest-smoke-v1",
+  "OutDir": "./artifact-smoke",
+  "RowsPerChunk": 500,
+  "WorkOrders": 5000,
+  "Assets": 2000,
+  "Users": 20,
+  "Campuses": 8,
+  "BuildingsPerCampus": 2,
+  "FloorsPerBuilding": 2,
+  "RoomsPerFloor": 4,
+  "Manufacturers": 40,
+  "ModelsPerManufacturer": 12,
+  "AssetTypes": 30,
+  "Accounts": 12
+}

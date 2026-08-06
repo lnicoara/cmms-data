@@ -1,0 +1,15 @@
+{
+  "Seed": "cmms-loadtest-v1",
+  "OutDir": "./artifact-full",
+  "WorkOrders": 4000000,
+  "Assets": 1000000,
+  "Users": 500,
+  "Campuses": 8,
+  "BuildingsPerCampus": 12,
+  "FloorsPerBuilding": 5,
+  "RoomsPerFloor": 25,
+  "Manufacturers": 450,
+  "ModelsPerManufacturer": 15,
+  "AssetTypes": 220,
+  "Accounts": 60
+}

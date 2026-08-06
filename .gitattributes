@@ -1,0 +1,9 @@
+# Artifact chunks are gzipped JSON Lines and are large: the full run is 3.7 GB across 441 files, with the
+# biggest single chunk at 13 MB. Git stores binary blobs whole per revision, so committing these directly
+# would make every future clone pay for every past regeneration. LFS keeps the working tree usable.
+*.jsonl.gz filter=lfs diff=lfs merge=lfs -text
+
+# Everything else is text and should diff normally.
+*.json text
+*.md text
+*.cs text

@@ -1,0 +1,16 @@
+{
+  "Seed": "cmms-loadtest-small-v1",
+  "OutDir": "./artifact-small",
+  "RowsPerChunk": 5000,
+  "WorkOrders": 22000,
+  "Assets": 5000,
+  "Users": 500,
+  "Campuses": 8,
+  "BuildingsPerCampus": 4,
+  "FloorsPerBuilding": 3,
+  "RoomsPerFloor": 10,
+  "Manufacturers": 450,
+  "ModelsPerManufacturer": 15,
+  "AssetTypes": 220,
+  "Accounts": 60
+}

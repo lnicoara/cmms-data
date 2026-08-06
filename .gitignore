@@ -1,0 +1,8 @@
+# .NET build output, in case anyone tries to build the reference snapshot in tools/
+bin/
+obj/
+
+# Scratch regeneration output. Datasets belong in data/<profile>/ and are committed deliberately,
+# never picked up incidentally by a `git add .`.
+artifact/
+artifact-*/
