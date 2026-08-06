@@ -33,6 +33,11 @@ The product lives in [`cmms`](https://github.com/lnicoara/cmms). Nothing here is
    directory sitting on your disk, and a stale `full/` looks exactly like a fresh one. Read
    `manifest.json`'s seed and `totalRows` before trusting a dataset you did not just generate; the full
    run takes about an hour, which is enough incentive to reuse the wrong one.
+5. **A load never decides or changes the target's schema** (`lnicoara/cmms#2978`). Which schema an
+   environment runs is settled by promoting a commit, and a data load must not be the thing that settles it.
+   The generator records the migration ids its model carried; the loader compares them to what the target
+   has applied and declines on a mismatch, naming both. If they disagree, regenerate against the commit the
+   target runs. Never migrate the target to fit an artifact. See [docs/load.md](docs/load.md).
 
 ## Commands
 
@@ -68,7 +73,9 @@ the seed in the manifest. Details in [docs/regenerate.md](docs/regenerate.md).
 
 ```
 data/<profile>/
-  manifest.json   formatVersion, seed, generatedTables, rowsPerChunk, totalRows, the full parameter set
+  manifest.json   formatVersion, seed, generatedTables, rowsPerChunk, totalRows, the full parameter set,
+                  and the schema it was built against: sourceCommit, modelSourcesDirty, latestMigration,
+                  modelMigrations
   stats.json      observed-vs-target distribution checks
   run.json        elapsed seconds, peak working set
   <Table>/<Table>-NNNNN.jsonl.gz
@@ -91,9 +98,10 @@ writer that rolled on compressed size would be v2, not a compatible change.
   the load test then measures scans where production seeks. The corollary: **`small` is not a
   density-faithful sample** — use it to prove a pipeline, never to draw an index or query-plan conclusion.
 - **The loader refuses far more often than it fails,** and every refusal is deliberate: a row-count deficit,
-  pending migrations, a connection secret naming another database or another environment's server, a
-  `--clear-target` slug that does not match the target tenant. The alternative to each refusal is a
-  plausible-looking wrong dataset.
+  an artifact generated against migrations the target does not have, a connection secret naming another
+  database or another environment's server, a `--clear-target` slug that does not match the target tenant.
+  The alternative to each refusal is a plausible-looking wrong dataset. What no refusal ever does is change
+  the target: it reports both versions and stops.
 - **Clearing removes 136 of 162 tables** (the transitive closure of everything referencing the artifact's
   write set) **including every user**, which leaves the tenant unreachable through normal login. Recovery is
   the seed job's `ensureAdmin` mode. See [docs/load.md](docs/load.md), which also lists the known operational

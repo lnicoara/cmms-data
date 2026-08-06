@@ -19,6 +19,50 @@ GENERATOR_PARAMS=full.json dotnet run --project tools/Cmms.LoadDataGenerator -c 
   -- --OutDir=/tmp/gen-full
 ```
 
+## Generate against the schema you intend to load into
+
+The generator derives its columns from the EF model of **whatever commit is checked out**, and it never
+contacts the target. That is what lets it run on a laptop, and it is also why the checkout you generate from
+decides which databases the artifact fits.
+
+An artifact built from `main` fits a database that has every migration through `main`. It does not fit
+pre-prod unless pre-prod has been promoted that far, and that gap is not hypothetical: pre-prod was measured
+running a commit whose model lacked two columns the `small` artifact carried
+(`WorkOrders.ServiceProviderDate` and `Users.ArtifactsAdoptedAtUtc`).
+
+What the target runs, read from the deployed image tag:
+
+```bash
+IMG=$(az containerapp show -n ca-cmms-api -g rg-cmms-preprod \
+        --query "properties.template.containers[0].image" -o tsv)
+az acr manifest list-metadata --registry <acr> --name cmms-api \
+  --query "[?digest=='${IMG##*@}'].tags" -o tsv     # the tag IS the commit
+```
+
+Check out that commit before generating, and the artifact records it:
+
+```json
+"sourceCommit": "b518c6274d1d46e402fd831369da997c445d7a5e",
+"modelSourcesDirty": false,
+"latestMigration": "20260805233234_UserArtifactsAdoptedAtUtc",
+"modelMigrations": ["...", "..."]
+```
+
+`modelMigrations` is the load-bearing field. A commit is not readable from a database, which records
+migration ids and nothing else, and a commit that touches no migration produces an artifact fitting exactly
+the same schemas. The commit is provenance for a human; the migration list is what the loader compares.
+
+Two guards follow from this, both of which fail before writing anything:
+
+- Generation **refuses** when it cannot determine the commit, rather than writing an artifact that cannot say
+  what it fits. Outside a git checkout, name it: `--SourceCommit=<sha>`.
+- `modelSourcesDirty` is true when `src/Cmms.Domain` or `src/Cmms.Infrastructure` has uncommitted edits, which
+  means the recorded commit is not the whole truth about the model. Scoped to those two directories on
+  purpose: editing a script or the generator itself does not change the model.
+
+If the artifact and the target disagree, regenerate. Do not migrate the target to fit the artifact. See
+[load.md](load.md).
+
 ## GENERATOR_PARAMS is resolved relative to the PROJECT, not the repo root
 
 This is the trap, and it has already produced a wrong artifact once.

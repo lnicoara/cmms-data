@@ -49,11 +49,35 @@ the pre-prod seed job, which refuses to run if any user still exists. Plan for i
   (lnicoara/cmms#2910). Relational validity is the artifact's property, which is what the generator's
   self-validation exists to guarantee.
 
+## Schema compliance is a promotion concern, not a load-test one
+
+A load moves rows into a database whose schema is already settled. Deciding what schema an environment runs,
+and changing it, belong to promoting a build: `scripts/pre-prod/deploy-pre-prod.sh` applies migrations as
+part of promoting a named commit, and that is the only thing that may.
+
+The loader therefore never migrates anything and never asks whether the target is current. It asks one
+question, and it is a narrower one: **do these rows fit these tables?** The artifact's `manifest.json`
+records the migration ids its model carried, the target records what it has applied in
+`__EFMigrationsHistory`, and the two compare directly.
+
+- **Target behind the artifact.** The rows were written against migrations the database has never applied,
+  so the load declines, names both versions, and changes nothing. The fix is to regenerate against the
+  schema the target runs. Never to migrate the target.
+- **Target ahead of the artifact.** Migrations are additive by convention, so the rows still fit. Reported,
+  and the load continues; the load plan's column verification is the backstop.
+- **Artifact with no recorded schema.** Anything generated before `lnicoara/cmms#2978` has no migration list.
+  It still opens, and the report says plainly that the fit could not be checked.
+
+This is deliberately narrower than what the loader used to do. It compared the target against **its own
+binary's** model and told the operator to run the migration job, and `load-tenant.sh` duly grew a step that
+built and ran `caj-cmms-migrate` against pre-prod on every invocation. A data load could migrate the
+environment it was measuring, and every migration landing on `main` invalidated every artifact already
+generated. `tests/infra/load-job-conformance.test.sh` now asserts there is no path back to it.
+
 ## Preflight refuses more often than it fails
 
 The loader will not load into a database whose row counts disagree with the chunks it believes have landed.
 A deficit always refuses. An excess is probed, and chunks provably present are adopted rather than reloaded.
-Pending migrations refuse outright, so the target's schema must be current first.
 
 None of that is a bug to work around. Every one of those refusals exists because the alternative is a
 plausible-looking wrong dataset.
