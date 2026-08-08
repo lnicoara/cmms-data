@@ -20,8 +20,11 @@
 # would hide that behind an argument nobody reads.
 set -euo pipefail
 
-die() { echo "ERROR: $*" >&2; exit 1; }
-step() { echo; echo "==> $*"; }
+# Terminal output: colour, phase headers, and die(). Sourced BEFORE the argument loop, because the loop
+# calls die() and defining it afterwards meant a flag with a missing value died with 'die: command not
+# found' instead of its own message. Resolved from THIS script's location, not the working directory, so
+# the script works from anywhere. lnicoara/cmms#3046.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/output.sh"
 
 # Runs from anywhere. The generator resolves its profile against the process base directory AND the working
 # directory, so where you stood when you typed this changed which profile was found. Deriving the repo root
@@ -66,13 +69,14 @@ if [ -n "${AVAIL_GB:-}" ] && [ "$AVAIL_GB" -lt "$NEED_GB" ] 2>/dev/null; then
 fi
 
 step "Generating the 'full' dataset into $OUT"
-echo "    about 42.7 million rows, ~3.7 GB, and roughly an hour"
-echo "    ${AVAIL_GB:-?} GB free under $(dirname "$OUT")"
+fact "expected" "about 42.7 million rows, ~3.7 GB, roughly an hour"
+fact "free disk" "${AVAIL_GB:-?} GB under $(dirname "$OUT")"
 if [ -d "$OUT" ]; then
-  echo "    that directory EXISTS and will be replaced"
-  [ -f "$OUT/manifest.json" ] && command -v python3 >/dev/null 2>&1 && python3 -c \
-    "import json,sys;d=json.load(open(sys.argv[1]));print('    replacing: seed %s, %s rows, %s tables, generated %s' % (d['seed'], format(d['totalRows'], ','), len(d.get('generatedTables', [])), d.get('generationDate','?')))" \
-    "$OUT/manifest.json" 2>/dev/null || true
+  warn "that directory EXISTS and will be replaced"
+  PRIOR=$([ -f "$OUT/manifest.json" ] && command -v python3 >/dev/null 2>&1 && python3 -c \
+    "import json,sys;d=json.load(open(sys.argv[1]));print('replacing: seed %s, %s rows, %s tables, generated %s' % (d['seed'], format(d['totalRows'], ','), len(d.get('generatedTables', [])), d.get('generationDate','?')))" \
+    "$OUT/manifest.json" 2>/dev/null || true)
+  [ -n "$PRIOR" ] && note "$PRIOR"
 fi
 mkdir -p "$(dirname "$OUT")"
 
@@ -99,7 +103,7 @@ WOS=$(python3 -c "import json;print(json.load(open('profiles/full.json'))['WorkO
 if [ "$ROWS" -lt "$WOS" ] 2>/dev/null; then
   die "the artifact holds $ROWS rows, fewer than the ${WOS} work orders full.json asks for, so this is not the full dataset. The most likely cause is that GENERATOR_PARAMS did not resolve and the run used GeneratorOptions defaults, which carry full.json's OWN seed and would therefore look correct in the manifest. Delete $OUT and re-run."
 fi
-echo "    $(printf "%'d" "$ROWS" 2>/dev/null || echo "$ROWS") rows"
+ok "$(printf "%'d" "$ROWS" 2>/dev/null || echo "$ROWS") rows, which is the full dataset"
 
 step "Verifying the artifact against the pinned model"
 # The same check load-pre-prod.sh runs before it uploads anything, run here where it is free. An artifact
@@ -113,12 +117,19 @@ dotnet run --project tools/Cmms.LoadDataRunner -c Release --no-launch-profile --
 
 step "Done"
 if command -v python3 >/dev/null 2>&1; then
-  python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print('    seed %s, %s rows across %s tables' % (d['seed'], format(d['totalRows'], ','), len(d.get('generatedTables', []))))" \
-    "$OUT/manifest.json" 2>/dev/null || true
+  SUMMARY=$(python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print('%s|%s|%s' % (d['seed'], format(d['totalRows'], ','), len(d.get('generatedTables', []))))" \
+    "$OUT/manifest.json" 2>/dev/null || true)
+  if [ -n "$SUMMARY" ]; then
+    fact "seed" "${SUMMARY%%|*}"
+    fact "rows" "$(printf '%s' "$SUMMARY" | cut -d'|' -f2)"
+    fact "tables" "${SUMMARY##*|}"
+  fi
 fi
-du -sh "$OUT" 2>/dev/null | awk '{print "    " $1 " on disk"}'
-echo "    $OUT"
+SIZE=$(du -sh "$OUT" 2>/dev/null | awk '{print $1}')
+[ -n "$SIZE" ] && fact "on disk" "$SIZE"
+fact "artifact" "$OUT"
 echo
-echo "Loading this is separately blocked (lnicoara/cmms#2970): the bulk copy runs at roughly nine minutes"
-echo "per 100,000-row chunk, so the full artifact needs about 51 hours against a 12-hour job timeout."
-echo "Generate it now; load it once #2910 has sorted out the index posture."
+warn "loading this is separately blocked (lnicoara/cmms#2970)"
+note "the bulk copy runs at roughly nine minutes per 100,000-row chunk, so the full"
+note "artifact needs about 51 hours against a 12-hour job timeout. Generate it now;"
+note "load it once #2910 has sorted out the index posture."

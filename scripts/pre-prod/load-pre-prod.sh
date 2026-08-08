@@ -60,30 +60,11 @@ PROFILE="${PROFILE:-}"
 IMAGE_TAG="${IMAGE_TAG:-$(git rev-parse --short HEAD 2>/dev/null || echo manual)}"
 TIMEOUT_HOURS="${TIMEOUT_HOURS:-12}"
 
-# ---- Output ----------------------------------------------------------------------------------------
-# The terminal is a report, not a transcript. What an operator needs from a run this long is which phase
-# it is in, what it decided, and what it ended as. Everything a tool happens to print on the way there
-# (azcopy's progress meter, Log Analytics rows arriving out of order, ARM's deployment JSON) is noise that
-# buries exactly those three things, and a run that succeeded read the same as one that failed.
-#
-# Colour is off unless stdout is a terminal, and honours NO_COLOR. Piping this to a file or a CI log must
-# produce plain text, not escape sequences.
-if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
-  C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'
-  C_BLUE=$'\033[34m'; C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'; C_RED=$'\033[31m'
-else
-  C_RESET=; C_BOLD=; C_DIM=; C_BLUE=; C_GREEN=; C_YELLOW=; C_RED=
-fi
-
-step() { printf '\n%s%s> %s%s\n' "$C_BOLD" "$C_BLUE" "$1" "$C_RESET"; }
-fact() { printf '  %s%-20s%s %s\n' "$C_DIM" "$1" "$C_RESET" "$2"; }
-ok()   { printf '  %sok%s   %s\n' "$C_GREEN" "$C_RESET" "$1"; }
-warn() { printf '  %swarn%s %s\n' "$C_YELLOW" "$C_RESET" "$1" >&2; }
-note() { printf '  %s%s%s\n' "$C_DIM" "$1" "$C_RESET"; }
-
-# Defined before the argument loop because the loop calls die(). They used to be defined after it, so
-# `--clear-target` with no value died with 'die: command not found' instead of its own error message.
-die() { printf '\n%s%sFAILED: %s%s\n' "$C_BOLD" "$C_RED" "$*" "$C_RESET" >&2; exit 1; }
+# Terminal output: colour, phase headers, and die(). Sourced BEFORE the argument loop, because the loop
+# calls die() and defining it afterwards meant a flag with a missing value died with 'die: command not
+# found' instead of its own message. Resolved from THIS script's location, not the working directory, so
+# the script works from anywhere. lnicoara/cmms#3046.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/output.sh"
 
 # The digest ACR holds for $1:$IMAGE_TAG, or whatever az said when there is none. Called before a build to
 # decide whether to run one, and after a build to resolve what to deploy, so the two questions share an
@@ -232,7 +213,9 @@ for arg in "$@"; do
     # silently truncated --help mid-sentence after that edit, which is the failure mode of a line number
     # standing in for a section.
     -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
-    *) echo "Unknown argument: $arg" >&2; exit 2 ;;
+    # Through die() like every other refusal here. It used to echo and exit 2 directly, so the one message
+    # an operator sees for a typo was the only unstyled, unprefixed line the script produced.
+    *) die "Unknown argument: $arg" ;;
   esac
 done
 

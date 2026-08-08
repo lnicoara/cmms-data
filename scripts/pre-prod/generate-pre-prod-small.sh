@@ -20,8 +20,11 @@
 #   scripts/pre-prod/load-pre-prod.sh --artifact-dir=<the path this prints> --execute
 set -euo pipefail
 
-die() { echo "ERROR: $*" >&2; exit 1; }
-step() { echo; echo "==> $*"; }
+# Terminal output: colour, phase headers, and die(). Sourced BEFORE the argument loop, because the loop
+# calls die() and defining it afterwards meant a flag with a missing value died with 'die: command not
+# found' instead of its own message. Resolved from THIS script's location, not the working directory, so
+# the script works from anywhere. lnicoara/cmms#3046.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/output.sh"
 
 # Runs from anywhere. The generator resolves its profile against the process base directory AND the working
 # directory, so where you stood when you typed this changed which profile was found. Deriving the repo root
@@ -61,10 +64,11 @@ esac
 
 step "Generating the 'small' dataset into $OUT"
 if [ -d "$OUT" ]; then
-  echo "    that directory EXISTS and will be replaced"
-  [ -f "$OUT/manifest.json" ] && command -v python3 >/dev/null 2>&1 && python3 -c \
-    "import json,sys;d=json.load(open(sys.argv[1]));print('    replacing: seed %s, %s rows, generated %s' % (d['seed'], format(d['totalRows'], ','), d.get('generationDate','?')))" \
-    "$OUT/manifest.json" 2>/dev/null || true
+  warn "that directory EXISTS and will be replaced"
+  PRIOR=$([ -f "$OUT/manifest.json" ] && command -v python3 >/dev/null 2>&1 && python3 -c \
+    "import json,sys;d=json.load(open(sys.argv[1]));print('replacing: seed %s, %s rows, generated %s' % (d['seed'], format(d['totalRows'], ','), d.get('generationDate','?')))" \
+    "$OUT/manifest.json" 2>/dev/null || true)
+  [ -n "$PRIOR" ] && note "$PRIOR"
 fi
 mkdir -p "$(dirname "$OUT")"
 
@@ -84,10 +88,15 @@ dotnet run --project tools/Cmms.LoadDataRunner -c Release --no-launch-profile --
 
 step "Done"
 if command -v python3 >/dev/null 2>&1; then
-  python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print('    seed %s, %s rows across %s tables' % (d['seed'], format(d['totalRows'], ','), len(d.get('generatedTables', []))))" \
-    "$OUT/manifest.json" 2>/dev/null || true
+  SUMMARY=$(python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print('%s|%s|%s' % (d['seed'], format(d['totalRows'], ','), len(d.get('generatedTables', []))))" \
+    "$OUT/manifest.json" 2>/dev/null || true)
+  if [ -n "$SUMMARY" ]; then
+    fact "seed" "${SUMMARY%%|*}"
+    fact "rows" "$(printf '%s' "$SUMMARY" | cut -d'|' -f2)"
+    fact "tables" "${SUMMARY##*|}"
+  fi
 fi
-echo "    $OUT"
+fact "artifact" "$OUT"
 echo
-echo "Load it with:"
-echo "  scripts/pre-prod/load-pre-prod.sh --artifact-dir=$OUT --execute"
+note "load it with:"
+note "  scripts/pre-prod/load-pre-prod.sh --artifact-dir=$OUT"

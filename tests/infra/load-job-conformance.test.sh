@@ -230,6 +230,56 @@ grep -q 'is pinned to cmms $pin but' "$SCRIPT" \
   || fail "$SCRIPT must refuse to pack a cmms checkout that is not at the pinned commit. Packing a different commit under the pinned version is the exact drift the pin exists to prevent, and it fails silently."
 ok "$SCRIPT refuses to pack a checkout that is not at the pin"
 
+echo "== the operator scripts share one output style (lnicoara/cmms#3046) =="
+
+# These are read side by side during an incident. A phase header that is bold blue in one script and plain
+# in another is a difference the reader spends attention on before discovering it means nothing.
+#
+# One definition in lib/output.sh, sourced by each, rather than the same twenty lines pasted three times
+# and drifting. The sourcing resolves from the script's own location so it survives being run from any
+# directory, which a `. lib/output.sh` relative to the working directory would not.
+LIB=scripts/pre-prod/lib/output.sh
+[ -f "$LIB" ] || fail "$LIB is missing; every operator script sources it for colour, phase headers and die()."
+for op in scripts/pre-prod/*.sh; do
+  [ -f "$op" ] || continue
+  grep -q 'lib/output.sh' "$op" \
+    || fail "$op does not source $LIB. Pasting the helpers in again is how three scripts end up with three styles."
+  grep -q 'BASH_SOURCE' "$op" \
+    || fail "$op sources $LIB by a path relative to the working directory, so it breaks when run from anywhere else. Resolve it from \$BASH_SOURCE."
+done
+ok "every script in scripts/pre-prod sources $LIB from its own location"
+
+# No script may define its own copy of the helpers or the colour tokens. THAT is the drift worth catching:
+# a second definition silently wins over the sourced one and the two versions diverge from then on.
+#
+# Deliberately NOT a hunt for raw echo/printf. load-pre-prod.sh formats a carriage-return progress clock
+# and its result banners with the tokens directly, because no helper covers those, and it dumps captured
+# git output verbatim. All of that is correct, and an assertion that flagged it would be an assertion
+# people route around.
+for op in scripts/pre-prod/*.sh; do
+  [ -f "$op" ] || continue
+  if grep -qE '^(step|fact|ok|warn|note|die)\(\) *\{' "$op"; then
+    grep -nE '^(step|fact|ok|warn|note|die)\(\) *\{' "$op" >&2
+    fail "$op defines its own output helper (lines above). It sources $LIB; a second definition wins over the shared one and the two drift apart from that moment."
+  fi
+  if grep -qE '^ *C_(RESET|BOLD|DIM|BLUE|GREEN|YELLOW|RED)=' "$op"; then
+    fail "$op defines its own colour tokens. They come from $LIB, which is also what makes NO_COLOR and the not-a-terminal case work the same way everywhere."
+  fi
+done
+ok "no script redefines a helper or a colour token"
+
+# die() must be available BEFORE the argument loop runs, or a flag with a missing value dies with
+# 'die: command not found' instead of its own message. That happened, which is why it is asserted.
+for op in scripts/pre-prod/*.sh; do
+  [ -f "$op" ] || continue
+  src=$(grep -n 'lib/output.sh' "$op" | head -1 | cut -d: -f1)
+  loop=$(grep -nE '^for arg in "\$@"' "$op" | head -1 | cut -d: -f1)
+  [ -n "$loop" ] || continue
+  [ "$src" -lt "$loop" ] \
+    || fail "$op sources $LIB AFTER its argument loop, so a bad flag dies with 'die: command not found' instead of its own error."
+done
+ok "die() is defined before every argument loop"
+
 echo "== every operator script's repo guard names a path that exists (lnicoara/cmms#3045) =="
 
 # Each generate script opens by confirming it is standing in the right repository, with a guard shaped
