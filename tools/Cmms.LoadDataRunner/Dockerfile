@@ -38,9 +38,16 @@ COPY .packages/ .packages/
 COPY profiles/ profiles/
 COPY tools/ tools/
 
-RUN dotnet restore tools/Cmms.LoadDataRunner/Cmms.LoadDataRunner.csproj
+# WHICH cmms build the image carries, passed in rather than read from Directory.Build.props
+# (lnicoara/cmms#3050). The load script resolves the commit pre-prod's schema is at, packs that commit into
+# .packages/, and passes the matching version here, so the pin cannot be a hand-maintained value that has
+# drifted from the environment it claims to describe. The props default only serves a bare `dotnet build`.
+ARG CMMS_VERSION
+RUN dotnet restore tools/Cmms.LoadDataRunner/Cmms.LoadDataRunner.csproj \
+      ${CMMS_VERSION:+-p:CmmsVersion="$CMMS_VERSION"}
 
-RUN dotnet publish tools/Cmms.LoadDataRunner/Cmms.LoadDataRunner.csproj -c Release -o /app --no-restore
+RUN dotnet publish tools/Cmms.LoadDataRunner/Cmms.LoadDataRunner.csproj -c Release -o /app --no-restore \
+      ${CMMS_VERSION:+-p:CmmsVersion="$CMMS_VERSION"}
 
 # Console runtime (no ASP.NET). The built-in non-root 'app' user ships in the .NET 8 image.
 FROM mcr.microsoft.com/dotnet/runtime:8.0 AS runtime
