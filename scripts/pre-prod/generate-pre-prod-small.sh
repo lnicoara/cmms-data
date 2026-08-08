@@ -28,7 +28,11 @@ step() { echo; echo "==> $*"; }
 # removes the question instead of documenting it.
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || die "not inside a git checkout of this repo."
 cd "$ROOT"
-[ -f tools/Cmms.LoadDataGenerator/small.json ] || die "$ROOT does not look like the cmms repo (no tools/Cmms.LoadDataGenerator/small.json)."
+# The profiles are in profiles/, one copy (lnicoara/cmms#3026). This guard named
+# tools/Cmms.LoadDataGenerator/small.json, the path that copy used to sit at, so single-sourcing them
+# broke this script on every invocation and the message blamed the repo it was standing in for being the
+# wrong repo. A guard that names a path nobody maintains is worse than no guard.
+[ -f profiles/small.json ] || die "$ROOT does not look like the cmms-data repo (no profiles/small.json)."
 
 # DERIVED, not demanded. The 8.0.423 SDK under ~/.dotnet has to come before Homebrew's 8.0.128, which
 # throws two false CS8602s on this solution. A script that stopped to tell you to fix your PATH would be a

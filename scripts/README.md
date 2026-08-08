@@ -22,6 +22,33 @@ which is what generating means), and verifies the artifact against the pinned mo
 last check is free here and costs a multi-gigabyte upload and an image build when the load job discovers it
 instead.
 
+## scripts/pre-prod/generate-pre-prod-full.sh
+
+Produces the `full` dataset: 4,000,000 work orders and 1,000,000 assets, roughly 42.7 million rows, about
+3.7 GB, and around an hour. That is the scale epic lnicoara/cmms#2731 exists to measure.
+
+```bash
+scripts/pre-prod/generate-pre-prod-full.sh                 # to $HOME/git/cmms-data/data/full
+scripts/pre-prod/generate-pre-prod-full.sh --out=/abs/path
+```
+
+A near-twin of the small script rather than a shared engine with a `--profile` flag, because the two differ
+in the checks that matter. It refuses up front when free disk is short, rather than an hour in with a
+half-written artifact that looks complete. It prints the size and duration before starting, so a long
+silence is not read as a hang. And it asserts the generated row count afterwards.
+
+That last one is the important difference, and it runs the opposite way to the small script's hazard. A run
+that loses `GENERATOR_PARAMS` falls back to `GeneratorOptions` defaults, whose seed is `cmms-loadtest-v1`,
+which is **`full.json`'s own seed**. So the artifact would carry 5,000 work orders under the full seed,
+self-validate, and report success, and its manifest would look entirely correct. Keys are a pure function
+of `(seed, kind, ordinal)`, so that key space is a strict subset of the real full one's, which is the
+permanent-poisoning hazard hard rule 4 exists to prevent. The row count is the only thing that tells them
+apart, so the script checks it rather than trusting that the flag was passed.
+
+**Loading the result is separately blocked** by lnicoara/cmms#2970: the bulk copy runs at roughly nine
+minutes per 100,000-row chunk, so 438 chunks need about 51 hours against a 12-hour job timeout.
+lnicoara/cmms#2910 (index posture) is the likely fix. Generating is useful now; loading waits.
+
 ## scripts/pre-prod/load-pre-prod.sh
 
 **It loads.** Typing the name is the intent, so there is no second flag confirming it. `--plan` is the dry

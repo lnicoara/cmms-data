@@ -230,6 +230,41 @@ grep -q 'is pinned to cmms $pin but' "$SCRIPT" \
   || fail "$SCRIPT must refuse to pack a cmms checkout that is not at the pinned commit. Packing a different commit under the pinned version is the exact drift the pin exists to prevent, and it fails silently."
 ok "$SCRIPT refuses to pack a checkout that is not at the pin"
 
+echo "== every operator script's repo guard names a path that exists (lnicoara/cmms#3045) =="
+
+# Each generate script opens by confirming it is standing in the right repository, with a guard shaped
+#   [ -f <some-path> ] || die "... does not look like the ... repo ..."
+#
+# generate-pre-prod-small.sh guarded on tools/Cmms.LoadDataGenerator/small.json, and #3026 deleted that
+# path when the profiles were single-sourced into profiles/. The script then died on EVERY invocation,
+# telling the operator that cmms-data was not cmms-data. A guard pointing at a path nobody maintains is
+# worse than no guard: it fails closed, constantly, for a reason that has nothing to do with what it
+# claims to be checking.
+#
+# BEHAVIOURAL, not a grep for the right string. The path is extracted from each script and tested, so this
+# tracks whatever the guard actually says rather than whatever it said the day it was written.
+for gen in scripts/pre-prod/generate-pre-prod-*.sh; do
+  [ -f "$gen" ] || continue
+  guard=$(grep -oE '^\[ -f [^]]+ \]' "$gen" | head -1 | sed 's/^\[ -f //; s/ \]$//')
+  [ -n "$guard" ] \
+    || fail "$gen has no repo guard. Every generate script must confirm it is in the right checkout before it writes gigabytes somewhere."
+  [ -f "$guard" ] \
+    || fail "$gen guards on '$guard', which does not exist. The script therefore refuses to run at all, and blames the repository for it. Point the guard at a path this repo actually has."
+  ok "$(basename "$gen") guards on $guard, which exists"
+done
+
+# The full run in particular must not be able to silently produce the defaults. GeneratorOptions defaults
+# carry full.json's OWN seed, so a full run that lost GENERATOR_PARAMS emits a 5,000-work-order artifact
+# stamped with the full seed: the manifest looks right and the key space is a strict subset of the real
+# one's, which is the poisoning hazard the seed rule exists to prevent. The row count is the only thing
+# that tells the two apart, so it is asserted after the run rather than inferred from the flag being passed.
+FULLGEN=scripts/pre-prod/generate-pre-prod-full.sh
+if [ -f "$FULLGEN" ]; then
+  grep -q 'this is not the full dataset' "$FULLGEN" \
+    || fail "$FULLGEN must assert the generated row count against full.json's WorkOrders. Passing GENERATOR_PARAMS is the gate; the row count is the outcome, and a defaults run wears the full seed so nothing else distinguishes it."
+  ok "$FULLGEN proves the artifact is the full one, not the defaults wearing its seed"
+fi
+
 echo "== the operator script deletes nothing =="
 
 # The rule this section pins is the script's NAME. It loads pre-prod, so it loads; emptying a database is a
