@@ -17,6 +17,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Cmms.LoadDataGenerator.Test
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Cmms.LoadDataRunner.Tests", "tests\unit\Cmms.LoadDataRunner.Tests\Cmms.LoadDataRunner.Tests.csproj", "{F4BF086C-E394-4067-BCB5-5A68D54D3FAB}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Cmms.LoadDataRunner.SqlTests", "tests\unit\Cmms.LoadDataRunner.SqlTests\Cmms.LoadDataRunner.SqlTests.csproj", "{7A63D80A-1643-4F10-8C63-7F551675F6A0}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -42,6 +44,10 @@ Global
 		{F4BF086C-E394-4067-BCB5-5A68D54D3FAB}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{F4BF086C-E394-4067-BCB5-5A68D54D3FAB}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{F4BF086C-E394-4067-BCB5-5A68D54D3FAB}.Release|Any CPU.Build.0 = Release|Any CPU
+		{7A63D80A-1643-4F10-8C63-7F551675F6A0}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{7A63D80A-1643-4F10-8C63-7F551675F6A0}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{7A63D80A-1643-4F10-8C63-7F551675F6A0}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{7A63D80A-1643-4F10-8C63-7F551675F6A0}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{EBAF4160-3611-48B6-AB33-398A2F59DD52} = {6B35DCC4-DBA6-458F-A063-FE9B7B5520D1}
@@ -49,5 +55,6 @@ Global
 		{D91A7C3A-A2AC-452A-85AB-6E027371F6D5} = {93EC64E6-AE56-488E-B96E-95879982D771}
 		{A9A666B6-825A-438A-8076-A3560BDAF115} = {D91A7C3A-A2AC-452A-85AB-6E027371F6D5}
 		{F4BF086C-E394-4067-BCB5-5A68D54D3FAB} = {D91A7C3A-A2AC-452A-85AB-6E027371F6D5}
+		{7A63D80A-1643-4F10-8C63-7F551675F6A0} = {D91A7C3A-A2AC-452A-85AB-6E027371F6D5}
 	EndGlobalSection
 EndGlobal
