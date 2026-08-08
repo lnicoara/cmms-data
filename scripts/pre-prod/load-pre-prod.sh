@@ -64,7 +64,12 @@ TIMEOUT_HOURS="${TIMEOUT_HOURS:-12}"
 # calls die() and defining it afterwards meant a flag with a missing value died with 'die: command not
 # found' instead of its own message. Resolved from THIS script's location, not the working directory, so
 # the script works from anywhere. lnicoara/cmms#3046.
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/output.sh"
+# This script's own directory, resolved once. Everything that reaches a sibling script or the output
+# library goes through it, rather than re-deriving BASH_SOURCE at each call site: inside a function
+# BASH_SOURCE[0] means the file the function was DEFINED in, which is right here but is subtle enough that
+# a later reader can reasonably get it wrong, and a wrong answer is a sibling script "not found".
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+. "$SCRIPT_DIR/lib/output.sh"
 
 # The digest ACR holds for $1:$IMAGE_TAG, or whatever az said when there is none. Called before a build to
 # decide whether to run one, and after a build to resolve what to deploy, so the two questions share an
@@ -100,24 +105,22 @@ image_digest() {
 # this repo is pinned to, would put a different model behind that version number, which is precisely the
 # drift the pin exists to prevent, and it would be invisible: the build would succeed and the artifact
 # would fit nothing.
-CMMS_REPO="${CMMS_REPO:-$HOME/git/cmms}"
 pack_pinned_cmms() {
-  local pin head
-  pin=$(sed -n 's/.*<CmmsVersion>1\.0\.0-g\(.*\)<\/CmmsVersion>.*/\1/p' Directory.Build.props)
-  [ -n "$pin" ] || die "cannot read <CmmsVersion> from Directory.Build.props, so there is no way to know which cmms build this image should carry."
+  # WHICH cmms, and WHERE, are both answered by clone-cmms-from-pre-prod.sh (lnicoara/cmms#3050). It
+  # resolves the commit pre-prod's schema is at, clones cmms at that commit into .cmms/<commit>/, and
+  # prints the path. Already-cloned is a no-op, so this costs nothing after the first run for a pin.
+  #
+  # This used to pack out of $CMMS_REPO (default ~/git/cmms) and REFUSE unless that checkout happened to
+  # be sitting on the pinned commit, which is a load test telling the operator to move their working tree
+  # so it can build. Both the generator and the loader are pinned to pre-prod; the pin is a fact about the
+  # deployed environment that the tooling reads, never something anybody maintains and never a question to
+  # put to the operator.
+  local clone commit
+  clone=$("$SCRIPT_DIR/clone-cmms-from-pre-prod.sh" --print) \
+    || die "could not obtain a cmms checkout at pre-prod's commit; see above."
+  commit=$(basename "$clone")
 
-  # Asked of git rather than tested for a .git DIRECTORY. In a worktree .git is a file pointing at the
-  # real one, so a directory test rejects every worktree, and worktrees are how work on cmms is actually
-  # done here: the checkout sitting at the pinned commit is usually a worktree precisely because main is
-  # busy being something else.
-  git -C "$CMMS_REPO" rev-parse --git-dir >/dev/null 2>&1 \
-    || die "the image build needs a cmms checkout to pack Cmms.Infrastructure from, and '$CMMS_REPO' is not one. Set CMMS_REPO=/path/to/cmms (a worktree is fine)."
-  head=$(git -C "$CMMS_REPO" rev-parse --short HEAD 2>/dev/null || true)
-  if [ "$head" != "$pin" ]; then
-    die "this repo is pinned to cmms $pin but $CMMS_REPO is at ${head:-unknown}. Packing that checkout under version 1.0.0-g$pin would put a different model behind the pinned version, and the load would fail on columns the target does not have. Check out $pin there, or move <CmmsVersion> deliberately."
-  fi
-
-  note "packing cmms $pin from $CMMS_REPO"
+  note "packing cmms $commit from $clone"
   rm -rf .packages && mkdir -p .packages
   local log; log=$(mktemp)
 
@@ -130,18 +133,24 @@ pack_pinned_cmms() {
   #
   # The version goes to BOTH commands. --no-build packs what the build produced, so a version passed only
   # to pack would name one thing and contain another.
-  if ! dotnet build "$CMMS_REPO/src/Cmms.Infrastructure" -c Release -p:Version="1.0.0-g$pin" >"$log" 2>&1; then
+  if ! dotnet build "$clone/src/Cmms.Infrastructure" -c Release -p:Version="1.0.0-g$commit" >"$log" 2>&1; then
     tail -20 "$log" >&2
-    die "building cmms $pin from $CMMS_REPO failed (full log: $log)."
+    die "building cmms $commit from $clone failed (full log: $log)."
   fi
   for proj in Cmms.Domain Cmms.Application Cmms.Infrastructure; do
-    if ! dotnet pack "$CMMS_REPO/src/$proj" -c Release -p:Version="1.0.0-g$pin" --no-build -o .packages >"$log" 2>&1; then
+    if ! dotnet pack "$clone/src/$proj" -c Release -p:Version="1.0.0-g$commit" --no-build -o .packages >"$log" 2>&1; then
       tail -20 "$log" >&2
-      die "packing $proj from $CMMS_REPO failed (full log: $log)."
+      die "packing $proj from $clone failed (full log: $log)."
     fi
   done
   rm -f "$log"
-  ok "packed Cmms.Domain, Cmms.Application, Cmms.Infrastructure at 1.0.0-g$pin"
+
+  # The pin the csproj files resolve against has to BE the commit just packed, or the restore asks for a
+  # version that is not in .packages/ and fails naming a package rather than a stale pin. Derived from
+  # pre-prod and written here, rather than maintained by hand in Directory.Build.props and able to
+  # disagree with the environment it claims to describe.
+  CMMS_VERSION="1.0.0-g$commit"
+  ok "packed Cmms.Domain, Cmms.Application, Cmms.Infrastructure at $CMMS_VERSION"
 }
 
 FORCE_BUILD="${FORCE_BUILD:-0}"
@@ -159,7 +168,10 @@ build_if_absent() {
   pack_pinned_cmms
   note "building ${repo}:${IMAGE_TAG} (remote, a few minutes)"
   local log; log=$(mktemp)
-  if ! az acr build --registry "$ACR" --image "${repo}:${IMAGE_TAG}" --file "$dockerfile" . >"$log" 2>&1; then
+  # CMMS_VERSION is a plain build arg, not a secret: it is a version string, and it is already visible in
+  # the image's own assembly metadata, which is where TargetBuild reads it back from at run time.
+  if ! az acr build --registry "$ACR" --image "${repo}:${IMAGE_TAG}" --file "$dockerfile" \
+       --build-arg CMMS_VERSION="${CMMS_VERSION:-}" . >"$log" 2>&1; then
     tail -30 "$log" >&2
     die "building ${repo}:${IMAGE_TAG} failed (full log: $log)."
   fi

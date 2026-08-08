@@ -25,7 +25,13 @@ reference is the commit pre-prod runs. Measuring against `main` produces a numbe
 
 ## Hard rules
 
-1. **`<CmmsVersion>` in [Directory.Build.props](Directory.Build.props) is the pin, and it names a commit.**
+1. **The pin is read from PRE-PROD, never maintained by hand and never asked of the operator** (#3050).
+   `scripts/pre-prod/clone-cmms-from-pre-prod.sh` resolves the commit off pre-prod's `caj-cmms-migrate`
+   image, the same source `TargetBuild` uses for the generator, and clones cmms at that commit into
+   `.cmms/<commit>/`. `load-pre-prod.sh` packs from there and derives the package version from the
+   directory it packed, so the version cannot name a build the packages are not. Where the operator's own
+   `~/git/cmms` happens to be is not an input to anything. `<CmmsVersion>` in
+   [Directory.Build.props](Directory.Build.props) is only a default for a bare `dotnet build`.
    `Cmms.Infrastructure 1.0.0-g<shortsha>` is packed out of a local `cmms` checkout at that commit, into
    `.packages/`, so referencing it here is referencing a build rather than whatever is checked out.
    Never float it to a wildcard or bump it because a restore complained: a newer package is a different

@@ -211,8 +211,12 @@ ok "$DOCKERFILE takes the model from the packed context"
 if grep -qE '^ARG NUGET_TOKEN|mount=type=secret' "$DOCKERFILE"; then
   fail "$DOCKERFILE handles a build credential. The model comes from .packages/ in the context and nothing authenticates; a token here means a hosted feed came back."
 fi
-if grep -vE '^[[:space:]]*#' "$SCRIPT" | grep -qE -- '--secret-build-arg|--build-arg|NUGET_TOKEN'; then
-  fail "$SCRIPT passes a build credential. Packing the pinned commit into the context needs none."
+# CREDENTIAL-shaped build args only. This once banned every --build-arg and started failing the moment a
+# version string was passed through one (lnicoara/cmms#3050), which is not a secret and is already visible
+# in the built image's assembly metadata. An assertion that flags correct code is one people route around,
+# so it names what it actually objects to.
+if grep -vE '^[[:space:]]*#' "$SCRIPT" | grep -qiE -- '--secret-build-arg|--build-arg[= ]*"?[A-Za-z_]*(TOKEN|SECRET|PASSWORD|PAT|KEY)'; then
+  fail "$SCRIPT passes a credential to the image build. Packing the pinned commit into the context needs none, and a --build-arg is recorded in image history."
 fi
 ok "nothing in the chain handles a feed credential"
 
@@ -227,9 +231,52 @@ ok "$DOCKERFILE builds against the pinned package, not a source copy"
 # THE ASSERTION THAT MAKES THE PIN MEAN ANYTHING. Packing whatever the checkout happens to be at, under
 # the version this repo declares, puts a different model behind that version number invisibly: the build
 # succeeds and the artifact fits nothing. The commit has to be checked before the pack, not after.
-grep -q 'is pinned to cmms $pin but' "$SCRIPT" \
-  || fail "$SCRIPT must refuse to pack a cmms checkout that is not at the pinned commit. Packing a different commit under the pinned version is the exact drift the pin exists to prevent, and it fails silently."
-ok "$SCRIPT refuses to pack a checkout that is not at the pin"
+# Superseded by lnicoara/cmms#3050 and rewritten rather than deleted, because the PROPERTY still matters:
+# the packed version must be the commit that was actually packed. It used to be enforced by comparing the
+# operator's checkout against a pin in Directory.Build.props and refusing on a mismatch. There is nothing
+# left to mismatch: the clone IS the pinned commit, and the version is derived from the directory it came
+# out of, so the two cannot disagree by construction. Better than a check is not needing one.
+grep -q 'CMMS_VERSION="1.0.0-g$commit"' "$SCRIPT" \
+  || fail "$SCRIPT must derive the package version from the commit it just packed. A version from anywhere else can name a build the packages are not."
+ok "$SCRIPT derives the version from the commit it packed"
+
+echo "== the pin is read from pre-prod, never from the operator (lnicoara/cmms#3050) =="
+
+CLONER=scripts/pre-prod/clone-cmms-from-pre-prod.sh
+[ -f "$CLONER" ] || fail "$CLONER is missing; it is how this repo obtains cmms source at the commit pre-prod runs."
+
+# The commit is a FACT ABOUT PRE-PROD. It is read off the caj-cmms-migrate image, the same source
+# TargetBuild uses for the generator, so the two halves of the tooling cannot disagree about which build
+# they are for. Anything else -- a value in a checked-in file, an env var, whatever is checked out -- is a
+# copy of that fact that can drift from it.
+grep -q 'caj-cmms-migrate' "$CLONER" \
+  || fail "$CLONER must resolve the commit from pre-prod's caj-cmms-migrate image. A pin that comes from anywhere else is a second copy of a fact pre-prod already holds."
+ok "$CLONER resolves the commit from pre-prod itself"
+
+# And the load script must not go back to reading the operator's checkout. It packed out of $CMMS_REPO
+# (default ~/git/cmms) and REFUSED unless that checkout sat on the pinned commit, which is a load test
+# telling somebody to move their working tree so it can build.
+if grep -vE '^[[:space:]]*#' "$SCRIPT" | grep -qE 'CMMS_REPO'; then
+  fail "$SCRIPT reads CMMS_REPO again. Both the generator and the loader are pinned to pre-prod; where the operator's own checkout happens to be is not an input."
+fi
+grep -q 'clone-cmms-from-pre-prod.sh' "$SCRIPT" \
+  || fail "$SCRIPT must obtain its cmms source from $CLONER, not from a path the operator maintains."
+ok "$SCRIPT never reads the operator's checkout"
+
+# A clone, not a worktree. A worktree's .git is a file pointing back at the repository it came from, so it
+# is permanently tethered to that path and breaks when it moves. A clone is self-contained, which is the
+# whole property being bought here.
+if grep -vE '^[[:space:]]*#' "$CLONER" | grep -qE 'git .*worktree'; then
+  fail "$CLONER creates a worktree. A worktree stays tethered to the repository it came from; only a real clone makes this repo self-contained for a pin."
+fi
+ok "$CLONER makes a self-contained clone"
+
+# An interrupted clone must not leave something a later run trusts. It clones to a temporary path and
+# renames into place, so .cmms/<commit>/ is either a good checkout or absent, never a convincing-looking
+# directory that builds nothing.
+grep -q 'mv "$TMP" "$CLONE"' "$CLONER" \
+  || fail "$CLONER must clone to a temporary path and move it into place. A clone interrupted halfway would otherwise leave .cmms/<commit>/ present and incomplete, and every later run would have to be clever about it."
+ok "$CLONER cannot leave a half-finished clone behind"
 
 echo "== no script may exit silently (lnicoara/cmms#3048) =="
 

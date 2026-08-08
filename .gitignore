@@ -9,3 +9,7 @@ artifact/
 artifact-*/
 data/
 .packages/
+
+# Per-commit clones of cmms at the commit pre-prod runs (lnicoara/cmms#3050). Self-contained, large,
+# and fully reproducible from scripts/pre-prod/clone-cmms-from-pre-prod.sh.
+.cmms/

@@ -35,6 +35,41 @@ which is what generating means), and verifies the artifact against the pinned mo
 last check is free here and costs a multi-gigabyte upload and an image build when the load job discovers it
 instead.
 
+## scripts/pre-prod/clone-cmms-from-pre-prod.sh
+
+Puts a cmms checkout at **pre-prod's** commit inside this repo, at `.cmms/<commit>/`.
+
+```bash
+scripts/pre-prod/clone-cmms-from-pre-prod.sh          # ensure it exists
+scripts/pre-prod/clone-cmms-from-pre-prod.sh --print  # print the path only
+```
+
+It resolves the commit itself, off pre-prod's `caj-cmms-migrate` image, exactly as `TargetBuild` does for
+the generator. **Both the generator and the loader are pinned to pre-prod**: the pin is a fact about the
+deployed environment that the tooling reads, never a value anybody maintains and never a question put to
+the operator.
+
+A real **clone**, not a worktree. A worktree's `.git` is a file pointing back at the repository it came
+from, so it stays tethered to that path forever and breaks when it moves. A clone is self-contained: once
+`.cmms/<commit>/` exists, this repo needs nothing from anywhere to build for that pin.
+
+Idempotent, and it verifies by asking git what the checkout is at rather than by the directory existing.
+It clones to a temporary path and renames into place, so an interrupted run leaves either a good checkout
+or nothing, never a convincing-looking directory that builds nothing.
+
+One clone per pinned commit, accumulating as pre-prod is promoted. Disk is not the constraint here.
+
+`load-pre-prod.sh` calls this before it builds the image, so it usually needs running only when you want
+to see what the pin currently is.
+
+**If the commit cannot be found:** a squash-merged branch that is then deleted leaves its own commits
+unreachable, and the remote eventually collects them, so an image tagged with one of those names a commit
+nobody can fetch. If it still exists in a local checkout, push it back and re-run:
+
+```bash
+git push origin <commit>:refs/tags/preprod-schema-<commit>
+```
+
 ## scripts/pre-prod/generate-pre-prod-full.sh
 
 Produces the `full` dataset: 4,000,000 work orders and 1,000,000 assets, roughly 42.7 million rows, about
