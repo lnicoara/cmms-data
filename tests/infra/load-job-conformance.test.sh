@@ -230,6 +230,42 @@ grep -q 'is pinned to cmms $pin but' "$SCRIPT" \
   || fail "$SCRIPT must refuse to pack a cmms checkout that is not at the pinned commit. Packing a different commit under the pinned version is the exact drift the pin exists to prevent, and it fails silently."
 ok "$SCRIPT refuses to pack a checkout that is not at the pin"
 
+echo "== reporting on the work cannot fail the work (lnicoara/cmms#3047) =="
+
+# Under `set -e` an assignment carries the exit status of its command substitution, so
+#
+#   UP_DONE=$(grep -oE '[0-9]+ Done' "$LOG" | ...)
+#
+# kills the script when the grep matches nothing — silently, because a failed grep prints nothing. That
+# shipped, and a completed 209-file upload ended at a bare shell prompt with no error, no summary, and no
+# way for the operator to tell a finished upload from a crash.
+#
+# BEHAVIOURAL, not a grep for `|| true`. The extraction lines are pulled out of the script and run under
+# the same strict flags against a log that does NOT contain what they look for, which is the condition
+# that broke. A source-text check would pass the moment someone wrote the guard differently, and fail the
+# moment someone wrote it correctly in a way the pattern did not anticipate.
+probe=$(mktemp)
+printf 'azcopy said something else entirely\nno summary line here\n' > "$probe"
+extract=$(grep -E '^[[:space:]]*(UP_DONE|UP_FAILED|SIZE)=' "$SCRIPT" | sed 's/^[[:space:]]*//')
+[ -n "$extract" ] || fail "$SCRIPT no longer extracts an upload summary; if the reporting moved, move this assertion with it."
+
+# Run in a SEPARATE bash process, not a subshell inside the `if !` condition. Bash suppresses errexit for
+# any command whose failure is being tested, including a `( ... )` used as a condition, so the obvious
+# spelling of this check silently tests nothing. The first version of this assertion did exactly that: the
+# bug was reintroduced and it passed. A separate process keeps set -e live and reports through $?.
+runner=$(mktemp)
+{ echo 'set -euo pipefail'
+  echo 'AZ_LOG="$1"; ARTIFACT_DIR="$2"'
+  printf '%s\n' "$extract"
+  echo 'exit 0'
+} > "$runner"
+scratch=$(mktemp -d)
+if ! bash "$runner" "$probe" "$scratch" >/dev/null 2>&1; then
+  fail "$SCRIPT's upload-summary extraction exits non-zero when the log lacks the lines it parses, and under set -e that kills the run AFTER the upload has already succeeded. It reports on the work; it must not be able to fail it."
+fi
+rm -rf "$probe" "$runner" "$scratch"
+ok "the upload summary survives a log that does not contain it"
+
 echo "== the operator scripts share one output style (lnicoara/cmms#3046) =="
 
 # These are read side by side during an incident. A phase header that is bold blue in one script and plain
