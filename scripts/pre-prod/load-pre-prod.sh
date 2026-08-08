@@ -453,7 +453,7 @@ else
   [ -d "$ARTIFACT_DIR" ] || die "artifact directory '$ARTIFACT_DIR' not found. Generate it first with tools/Cmms.LoadDataGenerator, or pass ARTIFACT_DIR."
   [ -f "$ARTIFACT_DIR/manifest.json" ] || die "'$ARTIFACT_DIR' has no manifest.json, so it is not an artifact directory."
   command -v azcopy >/dev/null || die "azcopy not found. Install it (brew install azcopy) to upload the artifact, or stage it another way and re-run with SKIP_UPLOAD=1."
-  SIZE=$(du -sh "$ARTIFACT_DIR" | cut -f1)
+  SIZE=$(du -sh "$ARTIFACT_DIR" | cut -f1 || true)
   fact "uploading" "$SIZE from $ARTIFACT_DIR"
   # Managed-identity-free path: azcopy uses the operator's own az login, since the account is RBAC-only
   # (allowSharedKeyAccess is false) and there is no account key to pass.
@@ -472,13 +472,22 @@ else
   # end-of-job block; none of it survives being interleaved and all of it scrolls the run's actual
   # decisions off the screen. The two numbers that matter are printed instead.
   AZ_LOG=$(mktemp)
+  # --output-level is NOT set. It was 'essential', which suppresses the end-of-job summary the two lines
+  # below parse, so they found nothing. Since the output is captured to a file either way, there was
+  # never a reason to make azcopy quieter: quiet was the screen's problem and capture already solved it.
   if ! AZCOPY_AUTO_LOGIN_TYPE=AZCLI azcopy sync "${ARTIFACT_DIR}" "$ARTIFACT_PREFIX" \
-       --recursive --delete-destination=true --compare-hash=MD5 --output-level=essential >"$AZ_LOG" 2>&1; then
+       --recursive --delete-destination=true --compare-hash=MD5 >"$AZ_LOG" 2>&1; then
     tail -20 "$AZ_LOG" >&2
     die "artifact upload failed (full output: $AZ_LOG). If this is a permissions error, you need Storage Blob Data Contributor on $STORE."
   fi
-  UP_DONE=$(grep -oE '[0-9]+ Done' "$AZ_LOG" | tail -1 | cut -d' ' -f1)
-  UP_FAILED=$(grep -oE 'Number of File Transfers Failed: [0-9]+' "$AZ_LOG" | tail -1 | grep -oE '[0-9]+$')
+
+  # `|| true` on both, and it is not defensive padding. Under `set -e` an assignment carries the exit
+  # status of its command substitution, so a grep that matches nothing KILLS THE SCRIPT — with no message,
+  # because grep prints nothing when it fails to match. That is exactly what happened: a completed 209-file
+  # upload was followed by a bare shell prompt, and the operator had no way to tell a finished upload from
+  # a crashed one. The report about the work must never be able to fail the work.
+  UP_DONE=$(grep -oE '[0-9]+ Done' "$AZ_LOG" | tail -1 | cut -d' ' -f1 || true)
+  UP_FAILED=$(grep -oE 'Number of File Transfers Failed: [0-9]+' "$AZ_LOG" | grep -oE '[0-9]+$' | tail -1 || true)
   ok "uploaded ${UP_DONE:-?} file(s), ${UP_FAILED:-0} failed"
   rm -f "$AZ_LOG"
 fi
