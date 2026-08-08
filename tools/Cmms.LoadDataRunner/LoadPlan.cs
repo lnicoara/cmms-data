@@ -168,7 +168,12 @@ public sealed class LoadPlan
             }
         } while (grew);
 
-        return DependencyOrder(closure.ToList(), model);
+        // Optional edges ARE relaxed here, and that is only sound because the caller nulls every nullable
+        // foreign key in this closure before it deletes anything (TargetCleaner.ClearAsync). Once those
+        // columns hold NULL the only edges a DELETE can trip over are the required ones, and required
+        // edges are acyclic by the check above. Deleting without that nulling pass fails on
+        // FK_PoApprovalRules_AccessGroups_ApproverAccessGroupId and its peers. lnicoara/cmms#2993.
+        return DependencyOrder(closure.ToList(), model, relaxOptional: true);
     }
 
     /// <summary>
@@ -185,7 +190,18 @@ public sealed class LoadPlan
     /// only thing blocking progress, while required edges are never relaxed. A cycle made of required
     /// foreign keys genuinely has no valid load order, and that stops the run.
     /// </summary>
-    private static List<string> DependencyOrder(IReadOnlyList<string> tables, ModelBridge model)
+    /// <param name="relaxOptional">
+    /// TRUE for LOAD order, where a nullable foreign key need not be satisfied at insert time, so an
+    /// optional edge may be relaxed to break a cycle. FALSE for DELETE order, where it may not: DELETE
+    /// checks every foreign key regardless of nullability, so relaxing an optional edge produces an order
+    /// that deletes a parent while a child still points at it. lnicoara/cmms#2993.
+    ///
+    /// At 12 covered tables the relaxation almost never fired and the two orders were interchangeable in
+    /// practice. Covering all 158 made optional cycles ordinary, and the reverse walk started failing on
+    /// FK_PoApprovalRules_AccessGroups_ApproverAccessGroupId and its peers.
+    /// </param>
+    private static List<string> DependencyOrder(
+        IReadOnlyList<string> tables, ModelBridge model, bool relaxOptional = true)
     {
         var set = new HashSet<string>(tables, StringComparer.OrdinalIgnoreCase);
         var required = tables.ToDictionary(t => t, _ => new HashSet<string>(StringComparer.OrdinalIgnoreCase),
@@ -216,12 +232,17 @@ public sealed class LoadPlan
         while (remaining.Count > 0)
         {
             var ready = Ready(t => required[t].Concat(optional[t]));
-            if (ready.Count == 0) ready = Ready(t => required[t]);
+            if (ready.Count == 0 && relaxOptional) ready = Ready(t => required[t]);
 
             if (ready.Count == 0)
                 throw new InvalidOperationException(
-                    "Required foreign keys among the artifact's tables form a cycle, so no load order " +
-                    "satisfies them: " + string.Join(", ", remaining.OrderBy(t => t, StringComparer.Ordinal)));
+                    (relaxOptional
+                        ? "Required foreign keys among the artifact's tables form a cycle, so no load order "
+                        : "Foreign keys among the artifact's tables form a cycle that no DELETE order can "
+                          + "satisfy, because DELETE checks optional keys too. Break it by nulling one of "
+                          + "them before the delete. Cycle: ") +
+                    (relaxOptional ? "satisfies them: " : "") +
+                    string.Join(", ", remaining.OrderBy(t => t, StringComparer.Ordinal)));
 
             foreach (var t in ready) { ordered.Add(t); remaining.Remove(t); }
 
@@ -231,6 +252,27 @@ public sealed class LoadPlan
                 .ToList();
         }
         return ordered;
+    }
+
+    /// <summary>
+    /// The nullable foreign-key columns on a table, which the clear blanks before deleting anything.
+    ///
+    /// A nullable foreign key needs no parent at INSERT, which is why load order may relax it. DELETE has
+    /// no such allowance: it checks the constraint whatever the column's nullability, so an optional cycle
+    /// that loads cleanly has no valid delete order at all until those columns are emptied.
+    /// </summary>
+    public static IReadOnlyList<string> NullableForeignKeyColumns(string table, ModelBridge model)
+    {
+        var et = model.EntityTypeForTable(table);
+        if (et is null) return Array.Empty<string>();
+        return et.GetForeignKeys()
+            .Where(fk => !fk.IsRequired)
+            .SelectMany(fk => fk.Properties)
+            .Where(p => p.IsNullable && !p.IsPrimaryKey())
+            .Select(p => p.Name)
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToList();
     }
 
     public IEnumerable<string> Describe()

@@ -20,8 +20,21 @@ public sealed class Generator
     private readonly ArtifactWriter _out;
     private readonly Stats _stats = new();
 
-    private readonly Guid _ceLine = ServiceLineSeed.ClinicalEngineeringId;
-    private readonly Guid _feLine = ServiceLineSeed.FacilitiesId;
+    // SEED-DERIVED, like every other Id in the artifact. These were ServiceLineSeed.ClinicalEngineeringId
+    // and ServiceLineSeed.FacilitiesId, the only two hardcoded Guids the generator emitted, and that is what
+    // made a load collide with the target.
+    //
+    // 3c4f1c00-0000-4000-8000-000000000001 is not merely demo data. A MIGRATION inserts it into every tenant
+    // database as the row named "Main" (20260619024138_AddServiceLineScoping), so the artifact carried a
+    // primary key that already exists in a brand-new, never-seeded tenant. Every "load into a dedicated
+    // unseeded tenant" instruction in this tooling was wrong for that reason. DemoDataSeeder then writes
+    // both Guids again, which is why demo-health collided on two rows rather than one.
+    //
+    // Deriving them from the seed makes them unique per dataset, so the artifact stops claiming ownership of
+    // rows the schema itself put there. Assigned in the constructor rather than inline because _rng does not
+    // exist until it runs.
+    private readonly Guid _ceLine;
+    private readonly Guid _feLine;
 
     // Spine, held in memory because it is small and every later row references it.
     private readonly List<Guid> _rooms = new();
@@ -32,6 +45,8 @@ public sealed class Generator
     private readonly List<Guid> _accounts = new();
     private readonly List<Guid> _laborIds = new();
     private readonly List<(Guid Id, Guid ServiceLineId)> _equipment = new();
+    // Held so the model-driven pass can hang work-order children off rows that exist. #2993.
+    private readonly List<Guid> _workOrderIds = new();
 
     // Per-service-line work order numbering. The app mints numbers as COUNT(*) + 1 against a UNIQUE
     // (ServiceLineId, Number) index, counting soft-deleted rows too, so the generated sequence has to be
@@ -52,6 +67,9 @@ public sealed class Generator
     {
         _o = options;
         _rng = new Deterministic(options.Seed);
+        // Same coordinates EmitServiceLines writes these rows under, so the two agree by construction.
+        _ceLine = _rng.Id("sl", 1, "id");
+        _feLine = _rng.Id("sl", 2, "id");
         _bridge = new ModelBridge();
         _out = new ArtifactWriter(options.OutDir, options.RowsPerChunk);
         _generationCutoff = new DateTimeOffset(options.GenerationDate.ToDateTime(TimeOnly.MaxValue), TimeSpan.Zero);
@@ -67,6 +85,7 @@ public sealed class Generator
         EmitUsers();
         EmitAssets();
         EmitWorkOrders();
+        EmitEveryRemainingTable();
 
         _out.Dispose();
         _bridge.Dispose();
@@ -214,6 +233,39 @@ public sealed class Generator
     }
 
     // Reference and spine rows: created once, never edited, never deleted.
+    /// <summary>
+    /// Every table the hand-written emitters above do not write. lnicoara/cmms#2993.
+    ///
+    /// Runs LAST, and that ordering is the whole reason it works: the spine, assets and work orders are on
+    /// disk by now, so a synthesized ContractAsset or WorkOrderNote points at a row that genuinely exists
+    /// rather than at a Guid nobody minted. What the hand-written pass produced is registered first for
+    /// exactly that reason.
+    ///
+    /// Before this, the generator emitted 12 of 160 tables and nothing counted the other 148. A load left
+    /// Preventive Maintenance, Procedures, Inventory, Contracts and Purchasing empty, and because
+    /// --clear-target empties the artifact's whole foreign-key closure first, a loaded tenant held LESS
+    /// than before the load.
+    /// </summary>
+    private void EmitEveryRemainingTable()
+    {
+        var synth = new ModelSynthesizer(_bridge, _rng, _o, _generationCutoff);
+
+        // What the hand-written pass wrote, so the synthesized rows can reference it.
+        synth.Register("ServiceLines", new[] { _ceLine, _feLine });
+        synth.Register("Assets", _rooms.Concat(_campuses).Concat(_equipment.Select(e => e.Id)));
+        synth.Register("Models", _models);
+        synth.Register("Companies", _manufacturers);
+        synth.Register("AssetTypes", _assetTypes);
+        synth.Register("Accounts", _accounts);
+        synth.Register("Labor", _laborIds);
+        synth.Register("Users", Enumerable.Range(0, _o.Users).Select(i => _rng.Id("user", i)));
+        synth.Register("AccessGroups", new[] { _pinnedGroupId, _unpinnedGroupId });
+        synth.Register("WorkOrders", _workOrderIds);
+
+        var written = synth.EmitAll(_out.Totals.Keys.ToList(), (table, row) => _out.Write(table, row));
+        _stats.SynthesizedTables = written.Count;
+    }
+
     private void Emit<T>(string table, T entity, string kind, long ordinal) where T : class
         => EmitHistory(table, entity, kind, ordinal, AuditTime(kind, ordinal), 0, false);
 
@@ -241,15 +293,25 @@ public sealed class Generator
             ? _rng.Id(kind, ordinal, "corrid").ToString("N")
             : null;
 
+    // The dataset's own tag, six hex characters off the seed. It suffixes the two service lines' Name and
+    // Code because a unique Id is not enough to make these rows insertable: ServiceLines.Code carries a
+    // UNIQUE index (IX_ServiceLines_Code), and the plain codes "CE" and "FE" are the ones DemoDataSeeder
+    // already wrote. A load into any seeded tenant therefore failed on the index even once the primary key
+    // stopped colliding, which is the same defect one level down.
+    //
+    // Seed-derived rather than random, because the artifact must stay byte-identical for a given seed.
+    private string DatasetTag => _rng.Id("dataset", 0, "tag").ToString("N")[..6];
+
     private void EmitServiceLines()
     {
+        var tag = DatasetTag;
         Emit("ServiceLines", new ServiceLine
         {
-            Id = _ceLine, Name = "Clinical Engineering", Code = "CE", IsActive = true,
+            Id = _ceLine, Name = $"Clinical Engineering {tag}", Code = $"CE-{tag}", IsActive = true,
         }, "sl", 1);
         Emit("ServiceLines", new ServiceLine
         {
-            Id = _feLine, Name = "Facilities", Code = "FE", IsActive = true,
+            Id = _feLine, Name = $"Facilities {tag}", Code = $"FE-{tag}", IsActive = true,
         }, "sl", 2);
     }
 
@@ -508,6 +570,7 @@ public sealed class Generator
         for (var i = 0; i < _o.WorkOrders; i++)
         {
             var (assetId, line) = _equipment[_rng.NextInt("wo", i, "asset", 0, _equipment.Count)];
+            _workOrderIds.Add(_rng.Id("wo", i));
 
             var status = _rng.Pick("wo", i, "status", new[]
             {

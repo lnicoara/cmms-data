@@ -2,11 +2,7 @@
 
   <!-- lnicoara/cmms#2908, per epic #2731: bulk-copies the offline artifact from #2876 into ONE provisioned
        tenant database. Deliberately narrow (grill round 1): it holds no DDL permission and mutates no schema.
-       Index drop/rebuild and constraint re-trust live in an operator script, not here.
-
-       The ProjectReference on the generator is not incidental. Reusing ModelBridge means the column manifest
-       the loader writes against is the SAME derivation the generator wrote with, so the two cannot drift
-       (grill round 5). -->
+       Index drop/rebuild and constraint re-trust live in an operator script, not here. -->
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
@@ -19,8 +15,16 @@
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.1" />
   </ItemGroup>
 
+  <!-- Cmms.Infrastructure as a pinned package (lnicoara/cmms#3026); see the generator's csproj and
+       Directory.Build.props for why it is a package and not a copy.
+
+       The ProjectReference on the generator STAYS a project reference, and that is deliberate rather than
+       an oversight. It is local to this repo, and it means the loader writes against the SAME ModelBridge
+       derivation the generator wrote with, so the two cannot drift on a migration (#2908 grill round 5).
+       Turning it into a package would reintroduce exactly the drift it exists to prevent, between two
+       things that always ship together. -->
   <ItemGroup>
-    <ProjectReference Include="..\..\src\Cmms.Infrastructure\Cmms.Infrastructure.csproj" />
+    <PackageReference Include="Cmms.Infrastructure" Version="$(CmmsVersion)" />
     <ProjectReference Include="..\Cmms.LoadDataGenerator\Cmms.LoadDataGenerator.csproj" />
   </ItemGroup>
 

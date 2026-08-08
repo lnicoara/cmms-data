@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- lnicoara/cmms#2876: tests for the offline synthetic-data generator. Everything here runs with no
+       database and no Azure, which is the property that makes the generator validatable on a laptop. -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.0" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.InMemory" Version="8.0.11" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.8.0" />
+    <PackageReference Include="xunit" Version="2.5.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.5.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <!-- Cmms.Infrastructure as a pinned package rather than a ProjectReference into ../../../src, which is
+       a path this repository does not have (lnicoara/cmms#3026). The tests need the real EF model for the
+       same reason the generator does: they assert the artifact carries the columns the model declares, and
+       a fake model would let them pass while the artifact fitted nothing. -->
+  <ItemGroup>
+    <PackageReference Include="Cmms.Infrastructure" Version="$(CmmsVersion)" />
+    <ProjectReference Include="..\..\..\tools\Cmms.LoadDataGenerator\Cmms.LoadDataGenerator.csproj" />
+  </ItemGroup>
+
+</Project>

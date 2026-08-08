@@ -12,6 +12,17 @@ public sealed class GeneratorOptions
     public string OutDir { get; set; } = "./artifact";
     public int RowsPerChunk { get; set; } = 100_000;
 
+    /// <summary>
+    /// Rows written for each table the hand-written emitters do not cover (lnicoara/cmms#2993).
+    ///
+    /// Modest on purpose. These tables are here so their screens render and their joins execute against a
+    /// table with cardinality rather than an empty one; the volume argument in #2880 is about the tables
+    /// whose distribution is under test, and those have their own parameters above.
+    /// </summary>
+    public int SynthesizedRowsPerTable { get; set; } = 25;
+
+
+
     /// <summary>The date the artifact is "as of". Time-dependent derivations key off it, so a run is only
     /// self-consistent against this value, which is why the manifest records it.</summary>
     public DateOnly GenerationDate { get; set; } = new(2026, 8, 4);

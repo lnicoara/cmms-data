@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The half of the loader that can only be proven against a real database (lnicoara/cmms#3026).
+       Round-trip fidelity, resume, heal, partial-chunk refusal, and loading onto a target that already
+       holds rows nobody here wrote. These lived in Cmms.Api.Tests in cmms purely because that is where the
+       SQL Edge fixture was; they belong with the loader.
+
+       Separate from Cmms.LoadDataRunner.Tests, which runs with no database, no container and no credential.
+       Keeping them apart is what lets `dotnet test` on a laptop without Docker still mean something: the
+       offline suite passes and this one skips, rather than one mixed project reporting a partial result. -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.0" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.8.0" />
+    <PackageReference Include="Testcontainers" Version="3.10.0" />
+    <PackageReference Include="xunit" Version="2.5.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.5.3" />
+    <!-- Skip.IfNot, so a machine with no Docker reports these as skipped rather than failed. A red suite
+         for "no container runtime here" trains people to ignore a red suite. -->
+    <PackageReference Include="Xunit.SkippableFact" Version="1.4.13" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <!-- The pinned model, same version everything else here builds against: the container is migrated from
+       these migrations, so the schema under test is the schema this repository targets. -->
+  <ItemGroup>
+    <PackageReference Include="Cmms.Infrastructure" Version="$(CmmsVersion)" />
+    <ProjectReference Include="..\..\..\tools\Cmms.LoadDataRunner\Cmms.LoadDataRunner.csproj" />
+    <ProjectReference Include="..\..\..\tools\Cmms.LoadDataGenerator\Cmms.LoadDataGenerator.csproj" />
+  </ItemGroup>
+
+</Project>

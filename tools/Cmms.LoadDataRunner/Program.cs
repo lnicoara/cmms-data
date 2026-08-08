@@ -215,6 +215,12 @@ catch (Exception ex)
 }
 
 // --- Plan, then load only if told to. ---
+//
+// Which phase is running, so a failure can name it. One catch covers the clear and the load, and it used
+// to report both as "Load failed", so a clear that timed out on one table was indistinguishable from a
+// slow bulk copy. That cost two wrong diagnoses on a live pre-prod incident before the logs were read
+// closely enough to see the load had never started.
+var phase = "opening the artifact";
 try
 {
     var artifact = Artifact.Open(options.Artifact);
@@ -234,23 +240,43 @@ try
     // the guard set (tenant in the catalog, Active, secret targeting its OWN database on THIS environment's
     // server, migrations current). A DELETE has more need of those guards than a load does, and
     // reimplementing them alongside a script would be how they drift.
+    TargetCleaner.CleanReport? clean = null;
     if (!string.IsNullOrWhiteSpace(options.ClearTargetSlug))
     {
         Console.WriteLine();
         // ClearAsync prints as it deletes, so the caller does not re-print clean.Lines. A partial clear
         // has to be visible at the moment it happens, not assembled after a run that may never return.
-        await TargetCleaner.ClearAsync(plan, model, target, options.Execute, CancellationToken.None);
+        clean = await TargetCleaner.ClearAsync(
+            plan, model, target, options.Execute, CancellationToken.None,
+            table => phase = $"CLEARING, emptying [{table}]");
     }
 
+    phase = "opening the checkpoint store";
     var checkpoints = new BlobCheckpointStore(
         blobs, options.CheckpointContainer, artifact.Hash, target.DatabaseName);
 
+    phase = "LOADING";
     var report = await new Loader(artifact, plan, target, checkpoints, options).RunAsync(CancellationToken.None);
     foreach (var line in report.Lines) Console.WriteLine(line);
+
+    // The login goes back in. Last, because the loader's preflight refuses a target holding rows the
+    // artifact cannot account for, so the account has to be absent while the load runs and present the
+    // moment it ends. Access groups first: the user row points at one.
+    if (clean is not null)
+    {
+        phase = "restoring the preserved login";
+        var restored = await TargetCleaner.RestorePreservedAsync(target, clean, CancellationToken.None);
+        if (restored > 0)
+        {
+            Console.WriteLine();
+            Console.WriteLine($"restored {restored} login(s); this tenant is reachable.");
+        }
+    }
+
     return report.Ok ? 0 : 1;
 }
 catch (Exception ex)
 {
-    Console.Error.WriteLine($"Load failed: {ex.Message}");
+    Console.Error.WriteLine($"FAILED while {phase}: {ex.Message}");
     return 1;
 }

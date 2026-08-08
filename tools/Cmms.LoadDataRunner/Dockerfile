@@ -2,8 +2,20 @@
 #
 # It runs as a Container Apps Job INSIDE Azure, so it carries the user-assigned managed identity and sits
 # inside the VNet. That is the whole reason it exists: pre-prod SQL sets Deny Public Network Access, so a
-# load cannot be driven from a laptop at all. Build context is the repo root: the runner references
-# src/Cmms.Infrastructure and tools/Cmms.LoadDataGenerator.
+# load cannot be driven from a laptop at all. Build context is this repo's root.
+#
+# The product's source is NOT in the image any more (lnicoara/cmms#3026). It used to COPY src/ src/,
+# because the runner project-referenced src/Cmms.Infrastructure and the build context was the cmms repo.
+# Cmms.Infrastructure is a pinned package now, so the context is this repository and the restore pulls one
+# version of one model from a feed rather than compiling whatever happened to be checked out.
+#
+# The package arrives IN THE CONTEXT, in .packages/, packed out of a cmms checkout by
+# scripts/pre-prod/load-pre-prod.sh moments before this builds. No feed and therefore no credential: a
+# hosted feed would need auth even to read, and `az acr build` builds remotely, so the token would have to
+# cross into the build without landing in a layer. Nothing to leak is better than a secret handled well.
+#
+# The script asserts the checkout is at the pinned commit before packing, so what lands here is the model
+# this repository declares it targets rather than whatever was checked out.
 #
 # The image also carries azcopy, because the 3.7 GB artifact is staged from blob into the replica before
 # the load rather than mounted. An SMB Azure Files mount would have suited the loader's one-chunk-at-a-time
@@ -17,9 +29,17 @@ WORKDIR /src
 COPY Directory.Build.props ./
 # The SDK pin governs the image build too, or the deploy image could silently compile under a different SDK policy. lnicoara/cmms#1437
 COPY global.json ./
-COPY src/ src/
+# Which source Cmms.* comes from, and the mapping that stops anything else answering for it.
+COPY nuget.config ./
+# Cmms.Domain, Cmms.Application, Cmms.Infrastructure at the pinned version.
+COPY .packages/ .packages/
+# The profiles, because the generator project links ../../profiles/*.json into its output and a restore
+# fails on a link whose source is absent.
+COPY profiles/ profiles/
 COPY tools/ tools/
+
 RUN dotnet restore tools/Cmms.LoadDataRunner/Cmms.LoadDataRunner.csproj
+
 RUN dotnet publish tools/Cmms.LoadDataRunner/Cmms.LoadDataRunner.csproj -c Release -o /app --no-restore
 
 # Console runtime (no ASP.NET). The built-in non-root 'app' user ships in the .NET 8 image.

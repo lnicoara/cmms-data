@@ -39,7 +39,19 @@ public static class Validator
         // This pass is what makes the rest of them mean anything, and it runs first so a truncated artifact
         // is named as truncated rather than as valid. lnicoara/cmms#2965
         var emptyOrMissing = new List<string>();
-        foreach (var table in ExpectedTables)
+        using var coverageBridge = new ModelBridge();
+        var expectedTables = ExpectedTablesFor(coverageBridge);
+
+        // A table in the model that is neither generated nor exempt is an unclassified table, which is how
+        // a coverage gap grows without anyone deciding it should.
+        var unclassified = TableCoverage.Unclassified(coverageBridge.AllTableNames(), expectedTables);
+        Check("every model table is generated or exempt with a reason", unclassified.Count == 0,
+            unclassified.Count == 0 ? $"{expectedTables.Length} generated, {TableCoverage.Exempt.Count} exempt"
+                                    : "unclassified: " + string.Join(", ", unclassified));
+        Check("nothing is owed", TableCoverage.Pending.Count <= TableCoverage.PendingCeiling,
+            $"{TableCoverage.Pending.Count} pending, ceiling {TableCoverage.PendingCeiling}");
+
+        foreach (var table in expectedTables)
         {
             var dirPath = Path.Combine(dir, table);
             if (!Directory.Exists(dirPath) || Directory.GetFiles(dirPath, $"{table}-*.jsonl.gz").Length == 0)
@@ -51,7 +63,7 @@ public static class Validator
         }
         Check("every expected table is present and non-empty", emptyOrMissing.Count == 0,
             emptyOrMissing.Count == 0
-                ? $"{ExpectedTables.Length} tables"
+                ? $"{expectedTables.Length} tables"
                 : string.Join(", ", emptyOrMissing));
 
         // Pass 1: assets. Collect ids and parents, check the location constraint and tag uniqueness.
@@ -346,11 +358,20 @@ public static class Validator
     /// derived from the EF model: the point of this list is to catch a table the generator FAILED to write,
     /// and a list derived from the same run that produced the gap would agree with the gap.
     /// </summary>
-    private static readonly string[] ExpectedTables =
-    [
-        "AccessGroups", "Accounts", "Assets", "AssetTypes", "AuditEvents", "Companies",
-        "Labor", "Models", "ServiceLines", "Users", "WorkOrderLabor", "WorkOrders",
-    ];
+    /// <summary>
+    /// Every table the artifact is expected to hold, read from the EF model rather than written down here.
+    /// lnicoara/cmms#2993.
+    ///
+    /// This used to be a hand-written list of 12 names, which is precisely why nobody noticed the other 148
+    /// tables were empty: the check enumerated its own expectations, so it could only ever confirm them. A
+    /// list that cannot disagree with the code it checks is not a check. Reading the model means a table
+    /// added by a migration is expected the moment it exists.
+    /// </summary>
+    private static string[] ExpectedTablesFor(ModelBridge bridge) =>
+        bridge.AllTableNames()
+              .Where(t => !TableCoverage.Exempt.ContainsKey(t))
+              .OrderBy(t => t, StringComparer.Ordinal)
+              .ToArray();
 
     /// <summary>
     /// The location ids inside a LocationIdsJson value, or null if the value is not a well-formed array of

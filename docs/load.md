@@ -5,33 +5,49 @@ dataset in `data/`, and the known problems that are not fixed by using a smaller
 
 ## The command
 
-```bash
-# from the cmms checkout, logged in to the target subscription
-ARTIFACT_DIR=/path/to/cmms-data/data/small \
-  scripts/pre-prod/load-tenant.sh                          # PLAN: stages and verifies, writes nothing
+Loading happens from THIS repository now (lnicoara/cmms#3026); it used to happen from a `cmms` checkout.
 
-ARTIFACT_DIR=/path/to/cmms-data/data/small \
-  scripts/pre-prod/load-tenant.sh --execute --clear-target=<slug>
+```bash
+# logged in to the target subscription
+scripts/pre-prod/load-pre-prod.sh --artifact-dir=$HOME/git/cmms-data/data/small
+
+# the dry run: stages the artifact, verifies it, writes nothing
+scripts/pre-prod/load-pre-prod.sh --artifact-dir=$HOME/git/cmms-data/data/small --plan
 ```
 
-Plan mode is the default and writes nothing. `--execute` loads. `--clear-target=<slug>` is a second,
-separate yes: it empties the target first and the slug typed must match the tenant being emptied, so a
-habitual `--execute` cannot wipe a tenant on its own.
+It **loads**. Typing the name is the intent, so there is no second flag confirming it, and `--plan` is the
+opt-out. `--execute` is still accepted and does nothing new, because every existing note and shell history
+says it.
 
-## What clearing actually removes
+**It deletes nothing** (lnicoara/cmms#3025). The `--clear-target` flag documented here previously emptied
+the target's whole foreign-key closure before loading, with each DELETE committing on its own, so a load
+that failed afterwards left the tenant holding less than it started with. The flag is gone and the script
+refuses it with an explanation. The collision it existed for was the generator claiming ids and codes the
+target already owned, and that is fixed at the source instead.
 
-Far more than the twelve tables the artifact carries. The clear set is the transitive closure of everything
-that references those tables, which is 136 of 162 tables. It has to be: the artifact ships `ServiceLines`
-rows on well-known Guids, so those rows must go, and anything pointing at them must go first or the DELETE
-fails on a foreign key.
+The loader loads **on top of** whatever is already in the target. Rows it did not write are reported and
+kept: for a load test they are more rows under load, which is the quantity being measured.
 
-What survives is org structure, configuration, and reference data (`Organizations`, `ConfigSettings`,
-`FieldDefinitions`, `Campuses`, `Departments`, `PmSchedules` and similar), because nothing there references
-the artifact and the artifact could not put it back.
+## Why clearing is gone
 
-**Clearing removes every user.** The tenant is then unreachable through the normal login, and the admin API
-is behind interactive Entra. Recovery is a single job run against the tenant, using the `ensureAdmin` mode of
-the pre-prod seed job, which refuses to run if any user still exists. Plan for it; do not discover it.
+The load path can no longer delete, and this section records what it used to do so the reasoning is not
+lost with the code.
+
+`--clear-target` did not empty the tables the artifact carried. It emptied the transitive closure of
+everything referencing them, which under lnicoara/cmms#2993 (every table generated) is the whole tenant
+database. It ran BEFORE the load, and its DELETEs committed one table at a time with no encompassing
+transaction, so any load that failed afterwards left the target holding less than it started with.
+Repeated attempts at one load hit that hardest, which is exactly when a load is being debugged.
+
+It existed because the artifact collided with the target: it emitted `ServiceLines` at `ServiceLineSeed`'s
+Guids and at the codes `CE` and `FE`, hitting both the primary key and the unique `IX_ServiceLines_Code`.
+One of those Guids is inserted by a **migration** into every tenant database, so a brand-new unseeded
+tenant collided too, and this tooling's standing advice to "load into a dedicated unseeded tenant" was
+wrong. Both values are seed-derived now, so the artifact claims nothing the schema or the seeder owns, and
+there is nothing to clear.
+
+Deleting a tenant's contents is still a legitimate act; it is simply not something a script named for
+loading does on the way past. `TargetCleaner` remains, with its own tests, for a caller that means it.
 
 ## Known problems a smaller dataset does not fix
 
@@ -69,7 +85,7 @@ records the migration ids its model carried, the target records what it has appl
   It still opens, and the report says plainly that the fit could not be checked.
 
 This is deliberately narrower than what the loader used to do. It compared the target against **its own
-binary's** model and told the operator to run the migration job, and `load-tenant.sh` duly grew a step that
+binary's** model and told the operator to run the migration job, and the load script duly grew a step that
 built and ran `caj-cmms-migrate` against pre-prod on every invocation. A data load could migrate the
 environment it was measuring, and every migration landing on `main` invalidated every artifact already
 generated. `tests/infra/load-job-conformance.test.sh` now asserts there is no path back to it.

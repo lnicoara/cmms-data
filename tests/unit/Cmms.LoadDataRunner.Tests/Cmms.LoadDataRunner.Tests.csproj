@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- lnicoara/cmms#2908: tests for the load runner's offline half. Everything here runs with no database,
+       no container and no Azure credential. The database-backed half (round-trip fidelity, resume, heal,
+       partial-chunk refusal) lives in Cmms.Api.Tests so it joins the SqlSerial collection and cannot race
+       another SQL Edge container (lnicoara/cmms#2148). -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.0" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.8.0" />
+    <PackageReference Include="xunit" Version="2.5.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.5.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\tools\Cmms.LoadDataRunner\Cmms.LoadDataRunner.csproj" />
+    <ProjectReference Include="..\..\..\tools\Cmms.LoadDataGenerator\Cmms.LoadDataGenerator.csproj" />
+  </ItemGroup>
+
+</Project>
