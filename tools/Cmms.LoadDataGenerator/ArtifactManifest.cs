@@ -25,7 +25,8 @@ public static class ArtifactManifest
 {
     public const string FormatVersion = "v1";
 
-    public static void Write(string outDir, GeneratorOptions options, IReadOnlyDictionary<string, long> tableTotals)
+    public static void Write(string outDir, GeneratorOptions options, IReadOnlyDictionary<string, long> tableTotals,
+        TargetBuild.Resolved? target = null)
     {
         var manifest = new
         {
@@ -38,7 +39,18 @@ public static class ArtifactManifest
             // The covered set is recorded rather than implied: the tenant model has 162 tables and this emits
             // the volume tables plus the spine they need. A reader must be able to see the gap, not assume
             // there is none.
-            tenantModelTables = 162,
+            // Coverage, recorded so a reader can see the gap rather than assume there is none. It used to
+            // say only "162 tables exist"; it now says which are generated and which are exempt and why,
+            // because the previous shape let 148 empty tables read as a complete artifact.
+            tenantModelTables = tableTotals.Count + TableCoverage.Exempt.Count,
+            exemptTables = TableCoverage.Exempt
+                .OrderBy(kv => kv.Key, StringComparer.Ordinal)
+                .ToDictionary(kv => kv.Key, kv => kv.Value),
+            pendingTables = TableCoverage.Pending.OrderBy(t => t, StringComparer.Ordinal).ToArray(),
+            // Which build this artifact fits. An artifact on disk carries no evidence of the model it was
+            // built from otherwise, so it could only be checked against a target by loading it.
+            sourceCommit = target?.Commit,
+            targetEnvironment = TargetBuild.Environment,
             // OutDir is where the artifact happens to sit, not what it contains, so it is excluded: the same
             // seed written to two directories must produce two byte-identical manifests.
             parameters = new Dictionary<string, object?>(

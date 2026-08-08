@@ -1,0 +1,34 @@
+<Project>
+
+  <!-- Shared build settings, mirroring cmms so a file that moves between the two repos does not change
+       meaning on arrival. TreatWarningsAsErrors in particular: the tooling here bulk-copies rows into a
+       real database, and a nullable warning it was allowed to ignore is not a warning worth ignoring. -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <!-- WHICH BUILD OF cmms THIS REPO GENERATES AND LOADS FOR. One property, one place.
+       lnicoara/cmms#3026, per #2978 and #2993.
+
+       This is the single most consequential value in the repository, so it is not scattered across two
+       csproj files. The generator derives its column manifest from the EF model compiled into whatever
+       Cmms.Infrastructure it was built against, so this version decides which schema an artifact fits.
+
+       It names a COMMIT, because "the build pre-prod runs" is a commit and not a range. cmms publishes
+       1.0.0-g<shortsha> per commit on main, so pinning here is pinning to a build. Do NOT float this to a
+       wildcard or to a newer version because a restore complained: a newer package is a different model,
+       and an artifact generated against it stops fitting the target without anything saying so.
+
+       To move it: read the schema commit the environment actually runs (TargetBuild does this at
+       generation time and refuses on a mismatch), confirm cmms published a package for it, then change
+       this one line. -->
+  <PropertyGroup>
+    <CmmsVersion>1.0.0-ge7b7d4d0</CmmsVersion>
+  </PropertyGroup>
+
+</Project>

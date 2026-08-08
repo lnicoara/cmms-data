@@ -45,11 +45,20 @@ param loadStorageName string = 'stloadtest${uniqueString(resourceGroup().id)}'
 @description('Slug of the tenant to load, for example loadtest (its database is cmms-tenant-<slug>). This tenant must be UNSEEDED: the loader refuses a target whose tables already hold rows.')
 param tenantSlug string
 
+@description('Name of the dataset to load, for example small or full. It is the blob prefix under the artifact container, so each profile occupies its own address and two datasets cannot mix. lnicoara/cmms#2979.')
+@minLength(1)
+param artifactProfile string
+
 @description('FALSE plans and writes nothing. TRUE actually loads. Defaults to false so a mistaken deploy-and-start cannot move 42.7 million rows.')
 param loadExecute bool = false
 
 @description('Slug of the tenant whose write set may be emptied before loading. DESTRUCTIVE. Empty means never clear. It carries the SLUG rather than a boolean so the runner can refuse unless it matches tenantSlug: a deploy that changes the target but forgets this cannot empty the new tenant. Needs loadExecute too.')
 param clearTargetSlug string = ''
+
+@description('SQL command timeout, in seconds, for every statement the runner issues. The clear deletes in batches and the bulk copy commits per chunk, so this bounds ONE batch rather than a whole table; raising it is an escape hatch, not the way a large table is emptied. lnicoara/cmms#2979.')
+@minValue(60)
+@maxValue(3600)
+param loadTimeoutSeconds int = 600
 
 @description('Hours the job may run before Container Apps kills the replica. The loader is resumable, so a timeout costs a restart rather than the load.')
 @minValue(1)
@@ -134,12 +143,21 @@ resource loadJob 'Microsoft.App/jobs@2025-01-01' = {
             // which is the work-order photo store holding real product data. lnicoara/cmms#2917 round 2.
             { name: 'Storage__LoadCheckpointBlobUrl', value: loadBlobUrl }
             { name: 'Storage__ManagedIdentityClientId', value: uami.properties.clientId }
-            // Where the entrypoint stages the artifact from, and to.
-            { name: 'ARTIFACT_BLOB_URL', value: '${loadBlobUrl}artifact' }
+            // Where the entrypoint stages the artifact from, and to. The profile is part of the address,
+            // which is what makes "load the small dataset" a statement the JOB can act on. It used to read
+            // the artifact container itself, so every dataset ever uploaded landed at one address and the
+            // job loaded their union: staging 'small' over 'full' left 379 of full's chunk files in place
+            // and the run died on 2,268,899 chunk rows against a manifest declaring 250,869.
+            // lnicoara/cmms#2979.
+            { name: 'ARTIFACT_BLOB_URL', value: '${loadBlobUrl}artifact/${artifactProfile}' }
             { name: 'ARTIFACT_DIR', value: '/artifact' }
             { name: 'LOAD_TENANT_SLUG', value: tenantSlug }
             { name: 'LOAD_EXECUTE', value: string(loadExecute) }
             { name: 'LOAD_CLEAR_TARGET_SLUG', value: clearTargetSlug }
+            // Binds onto LoaderOptions.TimeoutSeconds through config.GetSection("Load"). Set here because
+            // the deployed job otherwise had no way to reach it: the value was compiled in, so the only
+            // way to change a timeout was to rebuild the image.
+            { name: 'Load__TimeoutSeconds', value: string(loadTimeoutSeconds) }
           ]
         }
       ]

@@ -1,0 +1,53 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tools", "tools", "{6B35DCC4-DBA6-458F-A063-FE9B7B5520D1}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Cmms.LoadDataGenerator", "tools\Cmms.LoadDataGenerator\Cmms.LoadDataGenerator.csproj", "{EBAF4160-3611-48B6-AB33-398A2F59DD52}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Cmms.LoadDataRunner", "tools\Cmms.LoadDataRunner\Cmms.LoadDataRunner.csproj", "{222043B2-5F39-4D57-B2AC-A83594607DFF}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{93EC64E6-AE56-488E-B96E-95879982D771}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "unit", "unit", "{D91A7C3A-A2AC-452A-85AB-6E027371F6D5}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Cmms.LoadDataGenerator.Tests", "tests\unit\Cmms.LoadDataGenerator.Tests\Cmms.LoadDataGenerator.Tests.csproj", "{A9A666B6-825A-438A-8076-A3560BDAF115}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Cmms.LoadDataRunner.Tests", "tests\unit\Cmms.LoadDataRunner.Tests\Cmms.LoadDataRunner.Tests.csproj", "{F4BF086C-E394-4067-BCB5-5A68D54D3FAB}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{EBAF4160-3611-48B6-AB33-398A2F59DD52}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{EBAF4160-3611-48B6-AB33-398A2F59DD52}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{EBAF4160-3611-48B6-AB33-398A2F59DD52}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{EBAF4160-3611-48B6-AB33-398A2F59DD52}.Release|Any CPU.Build.0 = Release|Any CPU
+		{222043B2-5F39-4D57-B2AC-A83594607DFF}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{222043B2-5F39-4D57-B2AC-A83594607DFF}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{222043B2-5F39-4D57-B2AC-A83594607DFF}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{222043B2-5F39-4D57-B2AC-A83594607DFF}.Release|Any CPU.Build.0 = Release|Any CPU
+		{A9A666B6-825A-438A-8076-A3560BDAF115}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A9A666B6-825A-438A-8076-A3560BDAF115}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A9A666B6-825A-438A-8076-A3560BDAF115}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A9A666B6-825A-438A-8076-A3560BDAF115}.Release|Any CPU.Build.0 = Release|Any CPU
+		{F4BF086C-E394-4067-BCB5-5A68D54D3FAB}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{F4BF086C-E394-4067-BCB5-5A68D54D3FAB}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{F4BF086C-E394-4067-BCB5-5A68D54D3FAB}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{F4BF086C-E394-4067-BCB5-5A68D54D3FAB}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{EBAF4160-3611-48B6-AB33-398A2F59DD52} = {6B35DCC4-DBA6-458F-A063-FE9B7B5520D1}
+		{222043B2-5F39-4D57-B2AC-A83594607DFF} = {6B35DCC4-DBA6-458F-A063-FE9B7B5520D1}
+		{D91A7C3A-A2AC-452A-85AB-6E027371F6D5} = {93EC64E6-AE56-488E-B96E-95879982D771}
+		{A9A666B6-825A-438A-8076-A3560BDAF115} = {D91A7C3A-A2AC-452A-85AB-6E027371F6D5}
+		{F4BF086C-E394-4067-BCB5-5A68D54D3FAB} = {D91A7C3A-A2AC-452A-85AB-6E027371F6D5}
+	EndGlobalSection
+EndGlobal

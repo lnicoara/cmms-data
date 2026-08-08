@@ -12,6 +12,9 @@ namespace Cmms.LoadDataGenerator;
 /// </summary>
 public sealed class Stats
 {
+    /// <summary>How many tables the model-driven pass wrote. lnicoara/cmms#2993.</summary>
+    public int SynthesizedTables;
+
     public long AuditCreates;
     public long WorkOrderAuditRows;
     public long AuditUpdates;

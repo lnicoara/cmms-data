@@ -16,12 +16,28 @@
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.1" />
   </ItemGroup>
 
+  <!-- The product's real EF model, as a PACKAGE pinned to one commit (lnicoara/cmms#3026).
+       This was a ProjectReference to ../../src/Cmms.Infrastructure when the tooling lived in cmms.
+
+       Not a source copy, and the distinction is load-bearing. ModelBridge builds a real CmmsDbContext over
+       a never-opened connection for two separate reasons: the column manifest is derived from the live
+       model rather than hand-listed, AND the resulting EntityEntry lets audit rows run through the
+       product's own AuditDiff and AuditEventFactory instead of a second implementation that would drift.
+       A forked copy would agree with itself and disagree with the target database, and that surfaces as a
+       corrupt bulk load rather than as a build error.
+
+       $(CmmsVersion) lives in Directory.Build.props. Change it there, never here, and read the reasoning
+       above it before changing it at all. -->
   <ItemGroup>
-    <ProjectReference Include="..\..\src\Cmms.Infrastructure\Cmms.Infrastructure.csproj" />
+    <PackageReference Include="Cmms.Infrastructure" Version="$(CmmsVersion)" />
   </ItemGroup>
 
+  <!-- The profiles are in profiles/, one copy, and this repo's rule 2 says they are the authoritative
+       input because generation is a pure function of the profile. They used to exist twice, here and
+       there, byte-identical, with the generator reading the copy nobody called authoritative. Linked
+       rather than duplicated so that cannot happen again. -->
   <ItemGroup>
-    <None Update="*.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\profiles\*.json" Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

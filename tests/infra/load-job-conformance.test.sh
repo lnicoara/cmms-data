@@ -13,13 +13,16 @@
 #   - the load-test account never becomes the repo's first shared-key exception
 #   - the staged artifact is verified before any row is written
 #   - deleting rows needs two independent yeses, and the load path cannot reach the delete path
+#   - the OPERATOR SCRIPT deletes nothing at all, and refuses to start a job configured to
 #
 # Exit 1 = a real assertion failure.
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
-SCRIPT=scripts/pre-prod/load-tenant.sh
+# Renamed from load-tenant.sh: this tooling only ever addresses pre-prod, and the old name also carried a
+# clear that emptied the tenant it named. Both are gone; the name says the one environment it acts on.
+SCRIPT=scripts/pre-prod/load-pre-prod.sh
 JOB=infra/load-job.bicep
 STORE=infra/modules/load-test-store.bicep
 ENTRY=tools/Cmms.LoadDataRunner/docker-entrypoint.sh
@@ -34,10 +37,18 @@ done
 
 echo "== plan-only by default =="
 
-# The operator script. A load has to be asked for at every layer, and this is the outermost one.
-grep -q '^EXECUTE=false' "$SCRIPT" \
-  || fail "$SCRIPT must default EXECUTE=false, so running it with no arguments plans rather than loads."
-ok "$SCRIPT defaults to plan"
+# The OPERATOR SCRIPT is the exception, since lnicoara/cmms#2993, and it is the only one. It is named
+# load-pre-prod, so typing its name IS the request to load; a second --execute asked the same question
+# twice. What it must still offer is the dry run, under its own flag.
+grep -q '^EXECUTE=true' "$SCRIPT" \
+  || fail "$SCRIPT must default EXECUTE=true. It is named for loading, and the layers below it are what catch a load nobody asked for."
+grep -qE '^\s*--plan\) EXECUTE=false' "$SCRIPT" \
+  || fail "$SCRIPT must offer --plan. Making the load the default removes the dry run only if nothing replaces it, and staging 3.4 GB to find out what would happen is worth keeping."
+# --execute was the old spelling and is all over the shell history and the notes. It asks for what now
+# happens anyway, so it must keep working rather than dying on an unknown argument.
+grep -qE '^\s*--execute\) EXECUTE=true' "$SCRIPT" \
+  || fail "$SCRIPT must still accept --execute. Every existing command says it, and refusing it breaks them for no gain."
+ok "$SCRIPT loads by name, offers --plan, and still accepts --execute"
 
 # The job template. Even a hand-run `az deployment group create` plus `job start`, bypassing the script,
 # must not load. This is the layer that catches a deploy nobody meant to be a load.
@@ -148,26 +159,83 @@ if grep -q 'ClearTableAsync' tools/Cmms.LoadDataRunner/Loader.cs; then
 fi
 ok "the load path cannot reach the delete path"
 
-# demo-health is only a valid target BECAUSE its write set gets cleared. Loading into it with clearing off
-# would fail on a primary key collision after doing real work, so the script refuses that combination up
-# front and says why.
+# demo-health is a SEEDED tenant, so a load into it collides on the primary key with the ServiceLines rows
+# the artifact ships. The script must refuse that up front and say why, rather than doing real work first.
 grep -q 'demo-health' "$SCRIPT" \
   || fail "$SCRIPT must name demo-health explicitly, either as the target or in its guard."
 ok "$SCRIPT names demo-health explicitly"
 
-# The fence is only real if the OPERATOR PATH keeps it. A CLEAR_TARGET=true default would collapse two
-# flags into one, because --execute alone would then delete, for whatever slug TENANT_SLUG happened to hold.
-grep -q '^CLEAR_TARGET=false' "$SCRIPT" \
-  || fail "$SCRIPT must default CLEAR_TARGET=false. A true default collapses the loader's two-flag delete fence into one."
-ok "$SCRIPT does not collapse the delete fence"
+echo "== the load does not decide or change pre-prod's schema (lnicoara/cmms#2978) =="
 
-# Typing the slug is the second yes, and it is what binds a wipe to ONE tenant. Without it, a stale
-# TENANT_SLUG plus a habitual --execute empties whatever it happens to point at.
-grep -q 'CLEAR_CONFIRM' "$SCRIPT" \
-  || fail "$SCRIPT must require the operator to name the tenant being cleared, so a wrong TENANT_SLUG cannot empty it."
-grep -qE 'CLEAR_CONFIRM.*!=.*TENANT_SLUG' "$SCRIPT" \
-  || fail "$SCRIPT must check the named tenant matches the target tenant."
-ok "$SCRIPT binds a wipe to a tenant the operator named"
+# The script used to build cmms-migrate, deploy caj-cmms-migrate, start it and wait for it, on every run.
+# That is a load-test script changing what schema pre-prod runs, and it did so measurably: #2993 found
+# pre-prod's tenant schema 85 commits ahead of the API image pre-prod was serving, because each load
+# dragged the schema toward whatever was checked out while the app stayed where it had been promoted.
+#
+# Matched against uncommitted lines only. The removal is explained in a comment block that necessarily
+# names the job and the command an operator runs deliberately, and a bare search would read that
+# explanation as the violation it describes.
+if grep -vE '^[[:space:]]*#' "$SCRIPT" | grep -qE 'build_if_absent cmms-migrate'; then
+  fail "$SCRIPT builds the migrate image again. Establishing pre-prod's schema belongs to the deploy path, not to a load test."
+fi
+if grep -vE '^[[:space:]]*#' "$SCRIPT" | grep -qE 'job start -n caj-cmms-migrate'; then
+  fail "$SCRIPT starts the migration job. A load must not apply migrations to every tenant database as a side effect of loading one."
+fi
+if grep -vE '^[[:space:]]*#' "$SCRIPT" | grep -qE 'migrate-job\.bicep'; then
+  fail "$SCRIPT deploys the migrate job template. It has no business establishing the schema it is about to load into."
+fi
+ok "$SCRIPT neither builds, deploys, nor starts the migration job"
+
+# Exactly one image, and it is the loader's. The migrate build coming back would show up here too, but this
+# says the positive thing: a load builds the thing that loads, and nothing else.
+IMAGE_BUILDS=$(grep -vE '^[[:space:]]*#' "$SCRIPT" | grep -cE '^build_if_absent ')
+[ "$IMAGE_BUILDS" = "1" ] \
+  || fail "$SCRIPT builds $IMAGE_BUILDS images; expected exactly 1 (cmms-load). The load runs in-VNet, so it needs its own image and nothing else's."
+ok "$SCRIPT builds one image, the loader's"
+
+echo "== the operator script deletes nothing =="
+
+# The rule this section pins is the script's NAME. It loads pre-prod, so it loads; emptying a database is a
+# different act and belongs under a different name. The clear it used to carry emptied the artifact's whole
+# foreign-key closure, which under lnicoara/cmms#2993 is every table in the tenant model, and it ran BEFORE
+# the load with each DELETE committing on its own. Every failed load attempt therefore left the tenant
+# emptied with nothing to put back, which is the case a repeatedly-failing load hits hardest.
+#
+# These assertions are the inverse of the ones that used to live here. The delete fence itself is NOT
+# relaxed: it still stands at the job, the entrypoint, and the binary, asserted above. What is asserted
+# here is that this operator path cannot reach it.
+
+# The deployment must state an EMPTY clear target, not interpolate a variable holding one.
+grep -vE '^[[:space:]]*#' "$SCRIPT" | grep -qE 'clearTargetSlug=""' \
+  || fail "$SCRIPT must pass clearTargetSlug=\"\" explicitly at the deployment, so a job left carrying a slug by an earlier run or a portal edit is converged back to deleting nothing."
+if grep -vE '^[[:space:]]*#' "$SCRIPT" | grep -qE 'clearTargetSlug="\$'; then
+  fail "$SCRIPT interpolates a variable into clearTargetSlug. This script deletes nothing, so the value is a constant empty string and never something a flag can set."
+fi
+ok "$SCRIPT deploys the job with an empty clear target"
+
+# No live assignment can bring the flag back by the back door. Matched against uncommented lines only: the
+# removed code is deliberately kept in place as comments, and a bare search would certify that history as
+# the violation it is explaining.
+if grep -vE '^[[:space:]]*#' "$SCRIPT" | grep -qE '^[[:space:]]*(CLEAR_TARGET|CLEAR_CONFIRM)='; then
+  fail "$SCRIPT assigns CLEAR_TARGET or CLEAR_CONFIRM. The clear was removed from this script; a live assignment is it coming back."
+fi
+ok "$SCRIPT has no live clear variables"
+
+# REFUSED, not ignored. An operator with the old command in their shell history must be told the flag is
+# gone, or they read the run that follows as a load that cleared first.
+grep -q 'clear-target has been removed from this script' "$SCRIPT" \
+  || fail "$SCRIPT must refuse --clear-target with an explanation. Silently dropping it means the old command still appears to work."
+ok "$SCRIPT refuses the removed flag instead of ignoring it"
+
+# Assert the outcome, not the gate. Removing the flag removes one way to SET the variable, not the variable:
+# LOAD_CLEAR_TARGET_SLUG lives on the job, and a Bicep deploy, a portal edit, or an earlier run of the old
+# script can all leave a slug in it. This script starts the job, so it reads the value back off the deployed
+# job and refuses rather than trusting the deployment it just issued.
+grep -q "LOAD_CLEAR_TARGET_SLUG'\].value" "$SCRIPT" \
+  || fail "$SCRIPT must read LOAD_CLEAR_TARGET_SLUG back off the deployed job before starting it. Issuing a deploy that sets it empty is not the same as the job being empty."
+grep -q 'will not start a job that does' "$SCRIPT" \
+  || fail "$SCRIPT must refuse to start caj-cmms-load when the deployed job is configured to clear a tenant."
+ok "$SCRIPT reads the deployed clear target back and refuses a job that would delete"
 
 echo "== artifact verification does not depend on the target =="
 
@@ -275,18 +343,43 @@ grep -q 'Refusing to start it: a stale image' "$SCRIPT" \
   || fail "$SCRIPT must verify the deployed job carries the image it just built, before starting it."
 ok "$SCRIPT verifies the deployed image before starting the job"
 
-# The closing NOTE is an unquoted heredoc, so anything shaped like $VAR in the ADVICE it prints gets
-# expanded at print time. Under `set -u` an unset one aborts the script AFTER the job has started, which
-# reads as a failed run while the load is actually under way. Behavioural, not a grep: the heredoc is
-# extracted and rendered with the same strict flags the script runs under.
-NOTE_BODY=$(sed -n '/^cat <<NOTE$/,/^NOTE$/p' "$SCRIPT" | sed '1d;$d')
-if ! printf '%s\n' "$NOTE_BODY" | (set -euo pipefail; RG=rg EXECUTE=false STORE=st; cat <<EOF_RENDER >/dev/null
-$(cat)
-EOF_RENDER
-) 2>/dev/null; then
-  fail "$SCRIPT's closing NOTE dies under set -u; escape any \$VAR in the advice it prints (use \\\$VAR)."
+# The advice the script prints must not die on the variables INSIDE it. The failure it guards: a run that
+# printed an az incantation containing $WS expanded it at print time, and under `set -u` an unset name
+# aborted the script AFTER the job had started, so a healthy load read as a failed run.
+#
+# This used to extract a `cat <<NOTE` heredoc and render it. The heredocs are gone, so that assertion had
+# quietly become a test of an empty string, passing because there was nothing left to check. Rewritten to
+# assert the two things that are actually true now, both anchored to code that exists.
+if grep -qE '^cat <<NOTE$' "$SCRIPT"; then
+  fail "$SCRIPT is back to printing advice through an unquoted heredoc. That is the construct that expanded \$WS at print time and aborted a healthy run under set -u."
 fi
-ok "the closing NOTE renders under set -u"
+# Every remaining line of printed advice goes through note(), whose argument is an ordinary double-quoted
+# string, so an unescaped $NAME is expanded when the line is printed. That is FINE for a name the script
+# has set, and it is what puts the real resource group into the command it hands you. The bug is a name
+# the script never sets: under set -u that aborts the run, and it aborts it after the job has started.
+#
+# So the assertion is about unset names specifically, not about interpolation. An earlier version of this
+# check flagged every $VAR and failed on $RG and $STORE, which are assigned twenty lines up. A test that
+# cannot tell a working line from a broken one is worse than no test, because someone will "fix" the code
+# to satisfy it.
+UNSET_REFS=""
+while IFS= read -r name; do
+  grep -qE "^[[:space:]]*(local )?${name}=|^${name}=|read -r ${name}\$|for ${name} in " "$SCRIPT" || UNSET_REFS="$UNSET_REFS $name"
+done < <(grep -E '^[[:space:]]*note "' "$SCRIPT" \
+         | grep -oE '[^\\]\$\{?[A-Za-z_][A-Za-z_0-9]*' \
+         | grep -oE '[A-Za-z_][A-Za-z_0-9]*$' | sort -u)
+if [ -n "$UNSET_REFS" ]; then
+  fail "$SCRIPT prints advice referencing variable(s) it never assigns:$UNSET_REFS. Under set -u that aborts the run after the job has started, so a healthy load reads as a failure. Escape them (\\\$VAR) or set them."
+fi
+ok "the printed advice references only variables the script sets"
+
+# The runner's output must be WAITED for, not grabbed. Log Analytics lags a minute or two behind a job
+# ending, so reading it once at the moment the job finishes returns whatever happened to have arrived:
+# mid-load table lines, out of order, with the loader's actual verdict still in flight. That is precisely
+# what made a completed run unreadable.
+grep -qE "grep -qE 'rows loaded\|PLAN ONLY\|FAILED while\|REFUSING'" "$SCRIPT" \
+  || fail "$SCRIPT must poll Log Analytics until the runner's TERMINAL line has landed. Reading once and printing the tail reports a finished load as a handful of unordered fragments."
+ok "$SCRIPT waits for the runner's verdict before reporting it"
 
 echo "== the job is sized for a load measured in hours =="
 
@@ -295,6 +388,93 @@ echo "== the job is sized for a load measured in hours =="
 grep -q 'replicaTimeout: timeoutHours \* 3600' "$JOB" \
   || fail "$JOB must express replicaTimeout in hours; the seed job's 1800s is far too short for this load."
 ok "$JOB expresses its timeout in hours"
+
+echo "== a dataset has an identity the job can act on (lnicoara/cmms#2979) =="
+
+# The defect this pins: 'the artifact' was one global blob address, so a profile named a directory on the
+# operator's laptop and nothing beyond it. Uploading the 250k 'small' dataset over the 4M 'full' one
+# replaced the chunk names they shared, left full's other 379 files sitting there, and the job loaded the
+# union: 2,268,899 chunk rows against a manifest declaring 250,869. The job cannot be asked for a dataset
+# it has no way to name, so the name has to reach it.
+grep -q 'param artifactProfile string' "$JOB" \
+  || fail "$JOB must take the dataset name as a parameter. Without it the job has no way to be told which dataset to load, and it reads whatever sits at the one artifact address."
+ok "$JOB takes the dataset name as a parameter"
+
+grep -qE "ARTIFACT_BLOB_URL', value: '\\\$\{loadBlobUrl\}artifact/\\\$\{artifactProfile\}'" "$JOB" \
+  || fail "$JOB must address the artifact per profile (artifact/\${artifactProfile}). Pointing the job at the container itself makes every dataset share one address, and two of them mix."
+ok "$JOB addresses the artifact per profile"
+
+grep -q 'artifactProfile="\$PROFILE"' "$SCRIPT" \
+  || fail "$SCRIPT must pass the profile through to the job deployment, or the flag stops at the upload and the job loads the wrong dataset."
+ok "$SCRIPT passes the profile through to the job"
+
+# copy adds and overwrites; only sync makes the destination MATCH the source. A regeneration that emits
+# fewer chunks than the last one leaves the surplus behind under copy, and the surplus is indistinguishable
+# from the dataset it is polluting.
+if grep -qE 'azcopy copy "\$\{ARTIFACT_DIR\}' "$SCRIPT"; then
+  fail "$SCRIPT uploads with 'azcopy copy', which never deletes. Use 'azcopy sync --delete-destination=true' so the staged prefix ends up as the artifact instead of absorbing it."
+fi
+grep -q 'delete-destination=true' "$SCRIPT" \
+  || fail "$SCRIPT must upload with --delete-destination=true, or a stale chunk from an earlier dataset survives the upload that was meant to replace it."
+ok "$SCRIPT uploads with sync semantics, not copy"
+
+# Generation is deterministic, so a regenerated chunk carries no meaningful mtime and a byte-different file
+# can be older than the blob it must replace. --overwrite=ifSourceNewer skipped exactly that file.
+if grep -v '^[[:space:]]*#' "$SCRIPT" | grep -q 'overwrite=ifSourceNewer'; then
+  fail "$SCRIPT compares modification times to decide what to upload. Artifact generation is deterministic, so a regenerated chunk can be older than the blob it replaces and get skipped without a word. Compare content."
+fi
+ok "$SCRIPT does not decide what to upload by timestamp"
+
+# Assert the outcome, not the gate: the local artifact being valid says nothing about the bytes the job
+# will open, and the job announcing the mismatch costs a 3.4 GB stage and an image build first.
+grep -q 'The staged copy is not this artifact' "$SCRIPT" \
+  || fail "$SCRIPT must check the STAGED artifact, not only the local one. The local directory is a different set of bytes from the copy the job reads."
+ok "$SCRIPT checks the staged copy, not just the local directory"
+
+grep -q "this run is about the '\$PROFILE' dataset" "$SCRIPT" \
+  || fail "$SCRIPT must verify the deployed job reads this run's profile before starting it. The image assertion proves which code runs, not which data it opens."
+ok "$SCRIPT verifies the deployed job reads this run's dataset"
+
+echo "== the operator says which dataset, and the script builds only what is missing =="
+
+# Discovery is gone on purpose. Looking in /tmp/gen-<profile> and in a cmms-data checkout meant two copies
+# of one profile could both exist with different manifests, and the script's best move at that point was to
+# stop and ask. A path the operator supplies has no ambiguity to resolve.
+grep -q 'artifact-dir=<absolute path> is required' "$SCRIPT" \
+  || fail "$SCRIPT must require --artifact-dir. A load of this size should not open by guessing which directory was meant."
+ok "$SCRIPT requires the dataset location"
+
+if grep -vE '^[[:space:]]*#' "$SCRIPT" | grep -qE '/tmp/gen-|CMMS_DATA_DIR|\$CMMS_DATA'; then
+  fail "$SCRIPT still searches for a dataset (a /tmp/gen path or a cmms-data checkout). The location is an input now; searching for it is what produced two candidates and a stalled run."
+fi
+ok "$SCRIPT does not search for a dataset"
+
+# Relative paths resolve against the caller's working directory, so the same command names different bytes
+# from different shells.
+grep -q 'must be an ABSOLUTE path' "$SCRIPT" \
+  || fail "$SCRIPT must reject a relative --artifact-dir; the same command would otherwise mean different datasets from different directories."
+ok "$SCRIPT requires an absolute path"
+
+# The tag is HEAD's short sha and the dirty-tree preflight refuses to run while any file the Dockerfile
+# COPYs is uncommitted, so a tag already in the registry was built from this source. Two remote builds at
+# roughly five minutes each ran on every repeat invocation and changed nothing about what got deployed.
+grep -q 'build_if_absent' "$SCRIPT" \
+  || fail "$SCRIPT must skip a build when the registry already holds this commit's tag."
+# One build call in the whole script, the one inside the helper. A second call naming a repo directly is a
+# build that bypasses the check, which is how the unconditional rebuild would come back.
+if grep -vE '^[[:space:]]*#' "$SCRIPT" | grep -qE 'az acr build .*--image "cmms-'; then
+  fail "$SCRIPT calls 'az acr build' with a hardcoded image name, bypassing build_if_absent. Route it through the helper so a repeat run of the same commit does not rebuild an identical image."
+fi
+BUILD_CALLS=$(grep -vE '^[[:space:]]*#' "$SCRIPT" | grep -cE 'az acr build')
+[ "$BUILD_CALLS" = "1" ] \
+  || fail "$SCRIPT has $BUILD_CALLS 'az acr build' calls; expected exactly one, inside build_if_absent."
+ok "$SCRIPT builds an image only when the registry lacks it"
+
+# The saving must not reach the assertion. What gets deployed is still decided by a digest read back from
+# the registry, and the job is still checked against it before anything starts.
+grep -q 'DIGEST=$(image_digest cmms-load)' "$SCRIPT" \
+  || fail "$SCRIPT must still resolve the load image's digest from the registry. Skipping the build must never mean deploying something nobody read back."
+ok "$SCRIPT still deploys by a digest read back from the registry"
 
 echo
 echo "PASS: load delivery conformance"

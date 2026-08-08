@@ -23,18 +23,29 @@ public sealed class LoadReport
 /// <summary>
 /// Runs (or merely plans) one load of one artifact into one tenant database.
 ///
-/// The preflight invariant is a single rule (grill round 4): for every target table, the rows actually
-/// present must equal the rows accounted for by chunks known to have landed. A fresh load is the
-/// degenerate case where that is zero, so there is no separate resume mode and no flag that turns the
-/// check off. A flag that disables an empty-check is exactly how a 42-million-row dataset lands in a
-/// database that was supposed to be something else, and an operator at 2am is precisely who would pass it.
+/// The preflight asks one question about the ARTIFACT'S OWN rows: can this dataset still be laid down
+/// correctly on this target? Two answers stop the run, and both are about the artifact rather than about
+/// the tenant.
+///
+/// A DEFICIT is always a refusal. Rows the checkpoints say landed are gone, so the target has drifted from
+/// the checkpoint set and a resume would not reproduce the dataset the artifact describes. No probe can
+/// explain rows going missing.
+///
+/// A PARTIALLY-PRESENT CHUNK is always a refusal. A chunk is one transaction, so this loader cannot produce
+/// half of one; finding half means something else wrote to the table, and repairing it row by row would be
+/// guessing at which rows belong.
 ///
 /// "Known to have landed" is deliberately wider than "checkpointed". A chunk commits and THEN its
-/// checkpoint is written, so a crash between the two leaves rows with no checkpoint (grill round 2). A
-/// bare count equality would refuse to resume in exactly the situation resumability exists for, so an
-/// EXCESS of rows is not an immediate refusal: the loader probes the uncheckpointed chunks and adopts the
-/// ones provably present. Only rows that no chunk can account for, or a chunk found half-present, stop
-/// the run. A DEFICIT is always a refusal, because rows going missing is drift no probe can explain.
+/// checkpoint is written, so a crash between the two leaves rows with no checkpoint (grill round 2). A bare
+/// count equality would refuse to resume in exactly the situation resumability exists for, so the loader
+/// probes the uncheckpointed chunks and adopts the ones provably present.
+///
+/// What is NOT a refusal, since lnicoara/cmms#2993: rows that no chunk can account for, meaning rows the
+/// artifact never wrote. Grill round 4 made that a refusal under the rule "the artifact owns the tables it
+/// targets". The rule is wrong for what this tool is. This is a LOAD TEST, and rows somebody else put there
+/// are more rows under load, which is the quantity being measured. The rule protected nothing and cost
+/// everything: it made a target loadable only after being emptied, which is how a failed load left pre-prod
+/// holding less data than before it ran. The count is reported and the load proceeds on top.
 /// </summary>
 public sealed class Loader
 {
@@ -202,11 +213,24 @@ public sealed class Loader
 
             if (actual != expected)
             {
-                report.Fail(
-                    $"REFUSING: {t.Table} holds {actual:N0} rows, and the chunks that are checkpointed or " +
-                    $"provably present account for only {expected:N0}. The extra rows did not come from this " +
-                    "artifact. The artifact owns the tables it targets; load into a dedicated unseeded tenant.");
-                ok = false;
+                // REPORTED, not refused. This used to fail the run on the rule that "the artifact owns the
+                // tables it targets", and that rule is wrong for what this tool is: a load test. Rows the
+                // artifact did not write are more rows under load, which is the thing being measured, so
+                // there is nothing to protect the run from. The rule's real cost was that it made the load
+                // unusable without first emptying the target, and emptying pre-prod is how a failed load
+                // left it with less data than it started with.
+                //
+                // The refusals that remain are the ones about the artifact's OWN rows: a deficit against the
+                // checkpoints above (rows that landed are gone, so a resume would not reproduce the dataset)
+                // and a partially-present chunk (something other than this loader wrote to the table). Those
+                // say the artifact cannot be laid down correctly. This one only ever said the tenant was not
+                // empty.
+                //
+                // Still said out loud, because a count that surprises the operator is worth seeing.
+                report.Say(
+                    $"note: {t.Table} holds {actual:N0} rows, and the chunks that are checkpointed or " +
+                    $"provably present account for {expected:N0}. The other rows did not come from this " +
+                    "artifact. Loading on top of them.");
             }
         }
 

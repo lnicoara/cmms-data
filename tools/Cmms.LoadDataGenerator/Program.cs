@@ -8,9 +8,41 @@ using Microsoft.Extensions.Configuration;
 // Opens no database connection and reads no Azure configuration on purpose, so it runs and is validated
 // on a laptop with only the .NET SDK. Loading the artifact is a separate concern and is not here.
 
+// An EXPLICITLY requested profile that cannot be found is an error, not an absence. lnicoara/cmms#2969
+//
+// Both JSON layers used to be optional, and the paths resolve relative to the process base directory rather
+// than the repo root, so a profile named from the wrong directory was skipped in silence and the run
+// proceeded on GeneratorOptions defaults. It printed a banner, self-validated, and reported success.
+//
+// The result is worse than a crash, because the defaults carry Seed = "cmms-loadtest-v1", which is the FULL
+// profile's seed. Keys are a pure function of (seed, kind, ordinal), so a small artifact stamped with that
+// seed has a key space that is a strict SUBSET of the full artifact's. The loader's chunk-presence probe is
+// a bare primary-key lookup, so it can adopt the full artifact's rows as this one's and write checkpoints
+// that nothing can delete, permanently poisoning the artifact against that database.
+//
+// params.json stays optional: an IMPLICIT default that is absent is a legitimate bare run. The distinction
+// is between what the operator asked for and what merely might have been there.
+// RESOLVED here to an absolute path, rather than handed to the configuration builder as written, because
+// the two disagree about what a relative path means. File.Exists resolves from the working directory, while
+// ConfigurationBuilder resolves from AppContext.BaseDirectory, which is the bin output. The profiles are
+// copied there (CopyToOutputDirectory in the csproj), so a bare "small.json" happens to work while
+// "tools/Cmms.LoadDataGenerator/small.json" silently does not, even though the file plainly exists and a
+// naive existence check says so. Both roots are tried, and the absolute result removes the ambiguity.
+var profileRequest = ProfileResolver.Resolve(
+    Environment.GetEnvironmentVariable("GENERATOR_PARAMS"),
+    [AppContext.BaseDirectory, Directory.GetCurrentDirectory()]);
+if (!profileRequest.Ok)
+{
+    Console.Error.WriteLine(profileRequest.Error);
+    return 1;
+}
+var resolvedProfile = profileRequest.Path;
+
 var config = new ConfigurationBuilder()
+    // params.json stays optional. An IMPLICIT default that is absent is a legitimate bare run; an EXPLICIT
+    // request that is absent is not, which is why the profile above is required once it is named.
     .AddJsonFile("params.json", optional: true)
-    .AddJsonFile(Environment.GetEnvironmentVariable("GENERATOR_PARAMS") ?? "none.json", optional: true)
+    .AddJsonFile(resolvedProfile ?? "none.json", optional: resolvedProfile is null)
     .AddEnvironmentVariables()
     .Build();
 
@@ -70,8 +102,18 @@ foreach (var (name, value) in new (string, int)[]
 if (Directory.Exists(options.OutDir)) Directory.Delete(options.OutDir, recursive: true);
 Directory.CreateDirectory(options.OutDir);
 
+// Says what it LOADED, not only what it computed. A run that reports its numbers without naming their
+// source cannot be told apart from a run that fell back to defaults, and telling those apart after the fact
+// meant reading the manifest's seed. lnicoara/cmms#2969
+Console.WriteLine($"profile={resolvedProfile ?? "(none, defaults plus params.json if present)"}");
 Console.WriteLine($"seed={options.Seed}  workOrders={options.WorkOrders:N0}  assets={options.Assets:N0}  users={options.Users:N0}");
 Console.WriteLine($"out={Path.GetFullPath(options.OutDir)}");
+
+// Which build this artifact is for, resolved BEFORE any row is written. An artifact generated against a
+// model the target does not have fails inside a container job after a multi-gigabyte upload, so the cheap
+// place to find out is here. lnicoara/cmms#2993
+var target = TargetBuild.ResolveTarget();
+Console.WriteLine($"target={target.Commit}  ({target.Source})");
 
 var sw = Stopwatch.StartNew();
 var stats = new Generator(options).Run();
@@ -84,7 +126,7 @@ var peakMb = Environment.WorkingSet / 1024.0 / 1024.0;
 var jsonOpts = new JsonSerializerOptions { WriteIndented = true };
 
 // Shared with the loader's tests so they exercise a REAL artifact rather than an imitation of one.
-ArtifactManifest.Write(options.OutDir, options, stats.TableTotals);
+ArtifactManifest.Write(options.OutDir, options, stats.TableTotals, target);
 File.WriteAllText(Path.Combine(options.OutDir, "stats.json"), JsonSerializer.Serialize(stats.ToReport(options), jsonOpts));
 File.WriteAllText(Path.Combine(options.OutDir, "run.json"), JsonSerializer.Serialize(new
 {
