@@ -1,5 +1,18 @@
 # Operator scripts
 
+All of these share one output style, defined once in
+[`pre-prod/lib/output.sh`](pre-prod/lib/output.sh) and sourced by each: blue phase headers, dim aligned
+labels, green `ok`, yellow `warn`, a red `FAILED` on the way out. Colour switches off when stdout is not a
+terminal or `NO_COLOR` is set, so piping any of these to a file or a CI log gives plain text.
+
+The terminal is a report, not a transcript. These runs are measured in minutes or hours, and what an
+operator needs from one is which phase it is in, what it decided, and what it ended as. Output that a tool
+happens to produce along the way (a progress meter, a remote build's layer lines, ARM's JSON) is captured
+to a file and named in the failure rather than printed. A conformance test fails if a script redefines a
+helper or a colour token, because a second definition wins over the shared one and the two drift from
+there.
+
+
 These are the scripts, not copies of them. They run **from this repository** (lnicoara/cmms#3026); until
 that change they were reference copies that ran from a `cmms` checkout, because the tools could not build
 here.
