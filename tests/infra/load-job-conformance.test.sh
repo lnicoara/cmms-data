@@ -193,6 +193,38 @@ IMAGE_BUILDS=$(grep -vE '^[[:space:]]*#' "$SCRIPT" | grep -cE '^build_if_absent 
   || fail "$SCRIPT builds $IMAGE_BUILDS images; expected exactly 1 (cmms-load). The load runs in-VNet, so it needs its own image and nothing else's."
 ok "$SCRIPT builds one image, the loader's"
 
+echo "== the feed credential never lands in the image (lnicoara/cmms#3026) =="
+
+# The image restores Cmms.Infrastructure from a private feed, so a read:packages token has to reach a
+# REMOTE build. There is a right way and a way that publishes the token to anyone who can pull the image.
+#
+# --build-arg is recorded in image history and `docker history` prints it. --secret-build-arg is not
+# recorded at all. The difference is invisible in a working build, which is exactly why it is asserted.
+grep -q -- '--secret-build-arg "NUGET_TOKEN=' "$SCRIPT" \
+  || fail "$SCRIPT must pass the feed token with --secret-build-arg. A working build looks identical either way, and the wrong one puts a read:packages token in the published image's history."
+if grep -vE '^[[:space:]]*#' "$SCRIPT" | grep -qE -- '--build-arg[= ]*"?NUGET_TOKEN'; then
+  fail "$SCRIPT passes NUGET_TOKEN as a plain --build-arg. That is recorded in image history and readable by anyone who can pull the image."
+fi
+ok "$SCRIPT passes the feed token as a build SECRET"
+
+# And the Dockerfile has to consume it as one. A secret passed to a Dockerfile that reads it as an ARG is
+# back to being a layer, so both halves are asserted rather than just the caller.
+DOCKERFILE=tools/Cmms.LoadDataRunner/Dockerfile
+grep -q 'mount=type=secret,id=NUGET_TOKEN' "$DOCKERFILE" \
+  || fail "$DOCKERFILE must consume NUGET_TOKEN as a BuildKit secret mount. An ARG would bake it into a layer."
+if grep -qE '^ARG NUGET_TOKEN' "$DOCKERFILE"; then
+  fail "$DOCKERFILE declares NUGET_TOKEN as an ARG, which is recorded in image history."
+fi
+ok "$DOCKERFILE consumes the token as a mounted secret"
+
+# The product's source must NOT be in the image any more. Cmms.Infrastructure is a pinned package, and a
+# stray COPY src/ would mean the image compiles whatever is lying around instead of the pinned model,
+# which is the drift the package exists to prevent.
+if grep -qE '^COPY src/' "$DOCKERFILE"; then
+  fail "$DOCKERFILE copies the product source. Cmms.Infrastructure is a pinned package now, and compiling a local copy instead would reintroduce exactly the model drift the pin prevents."
+fi
+ok "$DOCKERFILE builds against the pinned package, not a source copy"
+
 echo "== the operator script deletes nothing =="
 
 # The rule this section pins is the script's NAME. It loads pre-prod, so it loads; emptying a database is a
@@ -316,7 +348,7 @@ echo "== the script cannot deploy code you are not looking at =="
 # commit and an image that IS that commit.
 # SCOPED to the image's build context. An unscoped check blocked a real load over an edited CLAUDE.md,
 # which cannot affect the built image at all.
-grep -q 'git status --porcelain -- Directory.Build.props global.json src tools' "$SCRIPT" \
+grep -q 'git status --porcelain -- Directory.Build.props global.json nuget.config profiles tools' "$SCRIPT" \
   || fail "$SCRIPT must check dirtiness ONLY for the paths the Dockerfile copies; an unscoped check blocks a load over an unrelated edited file."
 ok "$SCRIPT refuses a dirty tree only for files that reach the image"
 

@@ -115,9 +115,14 @@ build_if_absent() {
   # CAPTURED. `az acr build` streams the whole remote Docker build, hundreds of layer lines, and on a
   # success not one of them is information. On a failure every one of them is, so they go to a file the
   # die names rather than to the screen.
+  [ -n "${NUGET_TOKEN:-}" ] || die "building ${repo}:${IMAGE_TAG} needs a token that can read the Cmms.* packages from GitHub Packages, and none was found. Run 'gh auth login' (the script reads 'gh auth token'), or export NUGET_TOKEN=<PAT with read:packages>. Without it the remote build fails on a restore 401 after uploading the context."
   note "building ${repo}:${IMAGE_TAG} (remote, a few minutes)"
   local log; log=$(mktemp)
-  if ! az acr build --registry "$ACR" --image "${repo}:${IMAGE_TAG}" --file "$dockerfile" . >"$log" 2>&1; then
+  # --secret-build-arg, never --build-arg. The image restores Cmms.Infrastructure from a private feed
+  # (lnicoara/cmms#3026), so a read:packages token has to reach the remote build. A build arg is recorded
+  # in image history and `docker history` prints it; a secret build arg is not recorded at all.
+  if ! az acr build --registry "$ACR" --image "${repo}:${IMAGE_TAG}" --file "$dockerfile" \
+       --secret-build-arg "NUGET_TOKEN=${NUGET_TOKEN}" . >"$log" 2>&1; then
     tail -30 "$log" >&2
     die "building ${repo}:${IMAGE_TAG} failed (full log: $log)."
   fi
@@ -198,6 +203,18 @@ esac
 # means the staged prefix and the local directory always agree without a second thing to keep in sync.
 [ -n "$PROFILE" ] || PROFILE="$(basename "$ARTIFACT_DIR")"
 
+# The credential the image build restores Cmms.Infrastructure with (lnicoara/cmms#3026).
+#
+# DERIVED before it is demanded. `gh auth token` is already on this machine for anyone who works on these
+# repos, and a script that stops to tell you to export a variable it could have read is a script that
+# failed at the one thing it could have done for you. An explicit NUGET_TOKEN still wins, for CI or for a
+# token with different scopes.
+#
+# Only needed when a build actually runs. A repeat load at the same commit reuses the image in the
+# registry, so a missing token must not stop a run that was never going to build anything: the check sits
+# in build_if_absent, past the point where the build is known to be necessary.
+NUGET_TOKEN="${NUGET_TOKEN:-$(gh auth token 2>/dev/null || true)}"
+
 command -v az >/dev/null || die "az CLI not found."
 [ -f infra/load-job.bicep ] || die "run from the repo root (infra/load-job.bicep not found)."
 az account show >/dev/null 2>&1 || die "not logged in: run 'az login' first."
@@ -274,10 +291,11 @@ step "Preflight: this checkout must be the code you think is running"
 #   - uncommitted changes: the tag names a commit that does not contain them
 #   - running from the wrong checkout: the tag names a commit that lacks the fix you meant to run
 # The second one silently deployed a binary WITHOUT the LOAD_EXECUTE fix and the job reported success.
-# Scoped to the paths the Dockerfile actually COPYs, not the whole tree. A modified README or CLAUDE.md
+# Scoped to the paths the Dockerfile actually COPYs, which after lnicoara/cmms#3026 no longer include
+# src/ (Cmms.Infrastructure is a package) and do include nuget.config and profiles/. A modified README
 # cannot change the built image, so refusing to run over one is a false alarm that blocks a real load for
 # no reason. It did exactly that on the first run after this guard was added.
-DIRTY=$(git status --porcelain -- Directory.Build.props global.json src tools 2>/dev/null)
+DIRTY=$(git status --porcelain -- Directory.Build.props global.json nuget.config profiles tools 2>/dev/null)
 if [ -n "$DIRTY" ]; then
   echo "$DIRTY" >&2
   # WARNS now, where it used to refuse. `az acr build ... .` uploads the working tree, so an uncommitted
@@ -298,8 +316,8 @@ if [ -n "$DIRTY" ]; then
   # Tracked modifications come from the diff; untracked files have to be read directly, because a file git
   # has never seen contributes nothing to `git diff` and would otherwise be invisible to the hash while
   # being perfectly visible to the Docker build context.
-  DIRTY_HASH=$( { git diff HEAD -- Directory.Build.props global.json src tools
-                  git ls-files --others --exclude-standard -- Directory.Build.props global.json src tools \
+  DIRTY_HASH=$( { git diff HEAD -- Directory.Build.props global.json nuget.config profiles tools
+                  git ls-files --others --exclude-standard -- Directory.Build.props global.json nuget.config profiles tools \
                     | sort | while IFS= read -r f; do printf '%s\n' "$f"; cat "$f"; done
                 } | shasum | cut -c1-8 )
   IMAGE_TAG="${IMAGE_TAG}-dirty-${DIRTY_HASH}"

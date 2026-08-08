@@ -2,9 +2,9 @@
 
 Generated load-test datasets for the CMMS platform, and the profiles that reproduce them.
 
-The product lives in [`cmms`](https://github.com/lnicoara/cmms). This repository holds the **output** of its
-load-test data generator plus the inputs needed to regenerate that output exactly. Nothing here is built or
-deployed.
+The product lives in [`cmms`](https://github.com/lnicoara/cmms). This repository holds the load-test
+**tooling**, the inputs that reproduce its datasets exactly, and the operator scripts that run them. It
+builds and it runs; it consumes `cmms` as a pinned package (lnicoara/cmms#3026).
 
 ## Layout
 
@@ -13,21 +13,21 @@ profiles/     the inputs. Each JSON file fully determines one dataset.
 data/         the outputs. NOT COMMITTED — generated locally, one directory per profile run.
   small/        250,869 rows,      22 MB,  63 files
   full/      42,738,899 rows,     3.7 GB, 441 files
-tools/        REFERENCE SNAPSHOT of the four .NET tools. See the warning below.
+tools/        the two .NET tools. This is the source; edit it here.
   Cmms.LoadDataGenerator/   produces an artifact, opens no database
   Cmms.LoadDataRunner/      bulk-copies an artifact into one tenant database
-  Cmms.MigrationRunner/     applies EF migrations, which the loader requires to be current
-  Cmms.TenantSeedRunner/    demo seed, and the ensureAdmin recovery after a clear
-scripts/      REFERENCE SNAPSHOT of the operator scripts, and the order to run them in.
-infra/        the Bicep that stands up the load, migrate and seed jobs and the artifact store.
+scripts/      the operator scripts: generate, then load.
+infra/        the Bicep for the load job and the artifact store.
 tests/        the Azure-free conformance suite over the delivery chain.
 docs/         how to regenerate, and how to load.
 ```
 
-The whole chain is here, but only `profiles/` is authoritative — it is the only thing committed that cannot
-be derived from something else. `data/` is generated, ignored by Git, and always reproducible from a
-profile. Everything under `tools/`, `scripts/`, `infra/` and `tests/` is a copy taken from `cmms`, for
-reading. `scripts/README.md` covers the running order and why it is not optional.
+`profiles/` is the authoritative input: it is the only committed thing that cannot be derived from
+something else. `data/` is generated, ignored by Git, and always reproducible from a profile.
+`scripts/README.md` covers what each script does and what it deliberately does not do.
+
+`Cmms.MigrationRunner` and `Cmms.TenantSeedRunner`, and the migrate and seed job templates, are **not**
+here. They are the deploy path, not load testing, and they live in `cmms`.
 
 ## Two things to know before you rely on this
 
@@ -38,13 +38,17 @@ in `cmms` (`Same_seed_produces_a_byte_identical_artifact`). Primary keys are der
 is right and the data is stale. Regenerating the small run takes about 15 seconds; the full run takes about
 an hour.
 
-**2. `tools/` is a snapshot and does not build here.** Both projects carry a `ProjectReference` to
-`src/Cmms.Infrastructure` in the `cmms` repository, which pulls in `Cmms.Application` and `Cmms.Domain`.
-That is not incidental coupling to be refactored away: `ModelBridge` builds a real `CmmsDbContext` over a
-never-opened connection so the artifact's column manifest is derived from the live EF model, and the loader
-reuses the same `ModelBridge` so the two cannot drift on a migration. A forked copy would desynchronise
-silently the next time the schema moved, and the failure would surface as a corrupt bulk load rather than a
-build error. Read the snapshot; change it in `cmms`.
+**2. The tooling is pinned to one `cmms` commit, and that pin decides which schema a dataset fits.**
+`Cmms.Infrastructure` is a package, versioned `1.0.0-g<shortsha>`, one version per commit, and
+`<CmmsVersion>` in `Directory.Build.props` is the whole pin. **We target what is deployed to pre-prod, not
+the latest in `main`**; `TargetBuild` compares the commit carried by the loaded assembly against pre-prod's
+schema commit and refuses on a mismatch.
+
+The coupling is not incidental and is not being refactored away, only versioned. `ModelBridge` builds a
+real `CmmsDbContext` over a never-opened connection for two reasons: the artifact's column manifest is
+derived from the live EF model, **and** the resulting `EntityEntry` lets generated audit rows run through
+the product's own `AuditDiff` rather than a second implementation. A forked copy would agree with itself
+and disagree with the database, and that surfaces as a corrupt bulk load rather than a build error.
 
 ## The datasets
 
