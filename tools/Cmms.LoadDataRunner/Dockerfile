@@ -9,15 +9,13 @@
 # Cmms.Infrastructure is a pinned package now, so the context is this repository and the restore pulls one
 # version of one model from a feed rather than compiling whatever happened to be checked out.
 #
-# THE FEED NEEDS A CREDENTIAL, and it must not end up in the image. GitHub Packages requires auth even to
-# read, and `az acr build` builds remotely, so the token has to cross into the build. It arrives as a
-# BuildKit secret, mounted for the duration of one RUN and never written to a layer:
+# The package arrives IN THE CONTEXT, in .packages/, packed out of a cmms checkout by
+# scripts/pre-prod/load-pre-prod.sh moments before this builds. No feed and therefore no credential: a
+# hosted feed would need auth even to read, and `az acr build` builds remotely, so the token would have to
+# cross into the build without landing in a layer. Nothing to leak is better than a secret handled well.
 #
-#   az acr build --registry <acr> --image cmms-load:<tag> \
-#     --file tools/Cmms.LoadDataRunner/Dockerfile --secret-build-arg NUGET_TOKEN=<pat> .
-#
-# Not --build-arg. A build arg is recorded in image history and `docker history` prints it, which is how a
-# read:packages token ends up readable by anyone who can pull the image.
+# The script asserts the checkout is at the pinned commit before packing, so what lands here is the model
+# this repository declares it targets rather than whatever was checked out.
 #
 # The image also carries azcopy, because the 3.7 GB artifact is staged from blob into the replica before
 # the load rather than mounted. An SMB Azure Files mount would have suited the loader's one-chunk-at-a-time
@@ -31,22 +29,16 @@ WORKDIR /src
 COPY Directory.Build.props ./
 # The SDK pin governs the image build too, or the deploy image could silently compile under a different SDK policy. lnicoara/cmms#1437
 COPY global.json ./
-# Which feed Cmms.* comes from, and the package source mapping that stops anything else answering for it.
+# Which source Cmms.* comes from, and the mapping that stops anything else answering for it.
 COPY nuget.config ./
+# Cmms.Domain, Cmms.Application, Cmms.Infrastructure at the pinned version.
+COPY .packages/ .packages/
 # The profiles, because the generator project links ../../profiles/*.json into its output and a restore
 # fails on a link whose source is absent.
 COPY profiles/ profiles/
 COPY tools/ tools/
 
-# NUGET_TOKEN is a BuildKit secret: readable inside this RUN, absent from the resulting layer. The URL it
-# authenticates against is the one in nuget.config; the credential is added to a throwaway config in the
-# build stage so the checked-in file never carries one.
-RUN --mount=type=secret,id=NUGET_TOKEN,required=true \
-    dotnet nuget update source github \
-      --username x --password "$(cat /run/secrets/NUGET_TOKEN)" --store-password-in-clear-text \
-      --configfile nuget.config \
- && dotnet restore tools/Cmms.LoadDataRunner/Cmms.LoadDataRunner.csproj \
- && dotnet nuget remove source github --configfile nuget.config
+RUN dotnet restore tools/Cmms.LoadDataRunner/Cmms.LoadDataRunner.csproj
 
 RUN dotnet publish tools/Cmms.LoadDataRunner/Cmms.LoadDataRunner.csproj -c Release -o /app --no-restore
 

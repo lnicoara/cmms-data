@@ -26,11 +26,13 @@ reference is the commit pre-prod runs. Measuring against `main` produces a numbe
 ## Hard rules
 
 1. **`<CmmsVersion>` in [Directory.Build.props](Directory.Build.props) is the pin, and it names a commit.**
-   `cmms` publishes itself as `Cmms.Infrastructure 1.0.0-g<shortsha>`, one version per commit on `main`,
-   so referencing it here is referencing a build. Never float it to a wildcard or bump it because a
-   restore complained: a newer package is a different model, and an artifact generated against it stops
-   fitting the target with nothing saying so. `TargetBuild` compares the commit carried by the **loaded**
-   `Cmms.Infrastructure` assembly against pre-prod's schema commit and refuses on a mismatch.
+   `Cmms.Infrastructure 1.0.0-g<shortsha>` is packed out of a local `cmms` checkout at that commit, into
+   `.packages/`, so referencing it here is referencing a build rather than whatever is checked out.
+   Never float it to a wildcard or bump it because a restore complained: a newer package is a different
+   model, and an artifact generated against it stops fitting the target with nothing saying so.
+   Two things enforce it. `load-pre-prod.sh` refuses to pack a checkout that is not at the pin, and
+   `TargetBuild` compares the commit carried by the **loaded** assembly against pre-prod's schema commit
+   and refuses on a mismatch. The first stops a wrong model being built; the second stops it being used.
 2. **Cmms.Infrastructure is a package, never a source copy.** `ModelBridge` builds a real `CmmsDbContext`
    for two reasons and only one is metadata: the column manifest is derived from the live EF model, and
    the resulting `EntityEntry` lets audit rows run through the product's own `AuditDiff` and
@@ -39,7 +41,8 @@ reference is the commit pre-prod runs. Measuring against `main` produces a numbe
 3. **`data/` is never committed.** It is gitignored and absent from a fresh clone. `profiles/` is
    authoritative because generation is a pure function of the profile: the profile is right and a
    disagreeing `data/` is stale, always. Regenerate rather than reconcile. `profiles/` is also the ONLY
-   copy; a duplicate beside the generator fails CI.
+   copy: it used to exist twice, byte-identical, with the generator reading the one nobody called
+   authoritative. Do not put a second copy beside the generator.
 4. **Never reuse a seed across profiles.** Primary keys are a pure function of `(seed, kind, ordinal)` with
    no count input, so a smaller run on a larger profile's seed produces keys that are a strict subset of
    the larger artifact's. The loader's chunk-presence probe is a bare primary-key lookup, so it would adopt
@@ -59,8 +62,9 @@ reference is the commit pre-prod runs. Measuring against `main` produces a numbe
 ## Commands
 
 ```bash
-# Build and test. Needs a token that can read Cmms.* from GitHub Packages:
-#   dotnet nuget update source github -u <you> -p <PAT with read:packages> --store-password-in-clear-text
+# Build and test. Needs Cmms.* in .packages/, packed out of a cmms checkout at the pinned commit.
+# load-pre-prod.sh does this for you; by hand it is:
+#   dotnet pack <cmms>/src/Cmms.Infrastructure -c Release -p:Version=1.0.0-g<pin> -o .packages
 dotnet build Cmms.Data.sln -c Release
 dotnet test  Cmms.Data.sln -c Release
 
@@ -117,9 +121,13 @@ free. A writer that rolled on compressed size would be v2, not a compatible chan
   another environment's server, a pinned version that disagrees with the target's schema. What no refusal
   ever does is change the target: it reports both versions and stops. Rows it did not write are NOT a
   refusal (#3025) — that rule made a target loadable only after being emptied.
-- **The feed credential never enters the image.** The runner's image restores from a private feed, so the
-  token reaches the remote build as a `--secret-build-arg` and a BuildKit secret mount, never a `--build-arg`
-  or an `ARG`, either of which is recorded in image history. Both halves are asserted by the conformance suite.
+- **There is no feed and therefore no credential.** The runner's image needs the product's EF model and
+  cannot reach outside its own build context, so `load-pre-prod.sh` packs the pinned commit out of your cmms
+  checkout into `.packages/` moments before the image is built. A hosted feed would have needed auth even to
+  read, crossing into a remote `az acr build` without landing in a layer; nothing to leak beats a secret
+  handled well. The script REFUSES to pack a checkout that is not at the pinned commit, because packing a
+  different one under that version puts a different model behind it and the build still succeeds.
+  The cost, stated plainly: a clone of this repo on a machine with no cmms checkout does not build.
 - **Three profiles exist: `smoke`, `small`, `full`.** None has a committed dataset; whatever is in your local
   `data/` is whatever you last generated.
 

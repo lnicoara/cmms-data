@@ -27,11 +27,12 @@ JOB=infra/load-job.bicep
 STORE=infra/modules/load-test-store.bicep
 ENTRY=tools/Cmms.LoadDataRunner/docker-entrypoint.sh
 RUNNER=tools/Cmms.LoadDataRunner/Program.cs
+DOCKERFILE=tools/Cmms.LoadDataRunner/Dockerfile
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok()   { echo "  ok: $*"; }
 
-for f in "$SCRIPT" "$JOB" "$STORE" "$ENTRY" "$RUNNER"; do
+for f in "$SCRIPT" "$JOB" "$STORE" "$ENTRY" "$RUNNER" "$DOCKERFILE"; do
   [ -f "$f" ] || fail "$f is missing. The delivery chain is incomplete."
 done
 
@@ -193,37 +194,41 @@ IMAGE_BUILDS=$(grep -vE '^[[:space:]]*#' "$SCRIPT" | grep -cE '^build_if_absent 
   || fail "$SCRIPT builds $IMAGE_BUILDS images; expected exactly 1 (cmms-load). The load runs in-VNet, so it needs its own image and nothing else's."
 ok "$SCRIPT builds one image, the loader's"
 
-echo "== the feed credential never lands in the image (lnicoara/cmms#3026) =="
+echo "== the image carries the PINNED model, and no credential (lnicoara/cmms#3026) =="
 
-# The image restores Cmms.Infrastructure from a private feed, so a read:packages token has to reach a
-# REMOTE build. There is a right way and a way that publishes the token to anyone who can pull the image.
-#
-# --build-arg is recorded in image history and `docker history` prints it. --secret-build-arg is not
-# recorded at all. The difference is invisible in a working build, which is exactly why it is asserted.
-grep -q -- '--secret-build-arg "NUGET_TOKEN=' "$SCRIPT" \
-  || fail "$SCRIPT must pass the feed token with --secret-build-arg. A working build looks identical either way, and the wrong one puts a read:packages token in the published image's history."
-if grep -vE '^[[:space:]]*#' "$SCRIPT" | grep -qE -- '--build-arg[= ]*"?NUGET_TOKEN'; then
-  fail "$SCRIPT passes NUGET_TOKEN as a plain --build-arg. That is recorded in image history and readable by anyone who can pull the image."
+# The image needs the product's EF model and cannot reach outside its own build context, so the model
+# arrives as a package in .packages/, packed out of a cmms checkout by this script moments before the
+# build. There is no feed and therefore nothing to authenticate, which is the strongest version of "the
+# credential does not leak": there is no credential.
+grep -qE '^COPY \.packages/' "$DOCKERFILE" \
+  || fail "$DOCKERFILE must copy .packages/ into the build context. That is where Cmms.Infrastructure comes from; without it the restore has no source for the model and the image cannot be built at all."
+ok "$DOCKERFILE takes the model from the packed context"
+
+# No credential handling may creep back. A token in a build arg is recorded in image history and
+# `docker history` prints it, and a secret mount means a hosted feed has returned along with the
+# credential distribution problem this arrangement avoids.
+if grep -qE '^ARG NUGET_TOKEN|mount=type=secret' "$DOCKERFILE"; then
+  fail "$DOCKERFILE handles a build credential. The model comes from .packages/ in the context and nothing authenticates; a token here means a hosted feed came back."
 fi
-ok "$SCRIPT passes the feed token as a build SECRET"
-
-# And the Dockerfile has to consume it as one. A secret passed to a Dockerfile that reads it as an ARG is
-# back to being a layer, so both halves are asserted rather than just the caller.
-DOCKERFILE=tools/Cmms.LoadDataRunner/Dockerfile
-grep -q 'mount=type=secret,id=NUGET_TOKEN' "$DOCKERFILE" \
-  || fail "$DOCKERFILE must consume NUGET_TOKEN as a BuildKit secret mount. An ARG would bake it into a layer."
-if grep -qE '^ARG NUGET_TOKEN' "$DOCKERFILE"; then
-  fail "$DOCKERFILE declares NUGET_TOKEN as an ARG, which is recorded in image history."
+if grep -vE '^[[:space:]]*#' "$SCRIPT" | grep -qE -- '--secret-build-arg|--build-arg|NUGET_TOKEN'; then
+  fail "$SCRIPT passes a build credential. Packing the pinned commit into the context needs none."
 fi
-ok "$DOCKERFILE consumes the token as a mounted secret"
+ok "nothing in the chain handles a feed credential"
 
-# The product's source must NOT be in the image any more. Cmms.Infrastructure is a pinned package, and a
-# stray COPY src/ would mean the image compiles whatever is lying around instead of the pinned model,
-# which is the drift the package exists to prevent.
+# The product's source must NOT be in the image. Cmms.Infrastructure is a pinned package, and a stray
+# COPY src/ would mean the image compiles whatever is lying around instead of the pinned model, which is
+# the drift the pin exists to prevent.
 if grep -qE '^COPY src/' "$DOCKERFILE"; then
   fail "$DOCKERFILE copies the product source. Cmms.Infrastructure is a pinned package now, and compiling a local copy instead would reintroduce exactly the model drift the pin prevents."
 fi
 ok "$DOCKERFILE builds against the pinned package, not a source copy"
+
+# THE ASSERTION THAT MAKES THE PIN MEAN ANYTHING. Packing whatever the checkout happens to be at, under
+# the version this repo declares, puts a different model behind that version number invisibly: the build
+# succeeds and the artifact fits nothing. The commit has to be checked before the pack, not after.
+grep -q 'is pinned to cmms $pin but' "$SCRIPT" \
+  || fail "$SCRIPT must refuse to pack a cmms checkout that is not at the pinned commit. Packing a different commit under the pinned version is the exact drift the pin exists to prevent, and it fails silently."
+ok "$SCRIPT refuses to pack a checkout that is not at the pin"
 
 echo "== the operator script deletes nothing =="
 

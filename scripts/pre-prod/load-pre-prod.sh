@@ -103,6 +103,66 @@ image_digest() {
 #
 # FORCE_BUILD=1 rebuilds regardless, for a base-image refresh or a registry someone has edited by hand.
 # IMAGE_TAG=manual (no git) never skips, because then the tag is not a claim about any source at all.
+# Cmms.Infrastructure, packed OUT OF THE LOCAL cmms CHECKOUT into this repo's build context, moments
+# before the image is built. lnicoara/cmms#3026.
+#
+# The image needs the product's EF model and cannot reach outside its own build context: `az acr build`
+# uploads this directory and builds remotely in Azure, so a project reference to a sibling checkout names
+# a path the build machine does not have. The alternatives were a hosted feed, which costs a credential
+# that then has to cross into a remote build without landing in the image, or vendoring the source, which
+# is the fork this whole arrangement exists to avoid. Packing locally costs neither.
+#
+# It cannot go stale, which is the property that makes it better than a feed here rather than merely
+# cheaper: the .nupkg files are produced from the checkout seconds before they are consumed.
+#
+# The COMMIT IS ASSERTED, not assumed. Packing whatever the checkout happens to be at, under the version
+# this repo is pinned to, would put a different model behind that version number, which is precisely the
+# drift the pin exists to prevent, and it would be invisible: the build would succeed and the artifact
+# would fit nothing.
+CMMS_REPO="${CMMS_REPO:-$HOME/git/cmms}"
+pack_pinned_cmms() {
+  local pin head
+  pin=$(sed -n 's/.*<CmmsVersion>1\.0\.0-g\(.*\)<\/CmmsVersion>.*/\1/p' Directory.Build.props)
+  [ -n "$pin" ] || die "cannot read <CmmsVersion> from Directory.Build.props, so there is no way to know which cmms build this image should carry."
+
+  # Asked of git rather than tested for a .git DIRECTORY. In a worktree .git is a file pointing at the
+  # real one, so a directory test rejects every worktree, and worktrees are how work on cmms is actually
+  # done here: the checkout sitting at the pinned commit is usually a worktree precisely because main is
+  # busy being something else.
+  git -C "$CMMS_REPO" rev-parse --git-dir >/dev/null 2>&1 \
+    || die "the image build needs a cmms checkout to pack Cmms.Infrastructure from, and '$CMMS_REPO' is not one. Set CMMS_REPO=/path/to/cmms (a worktree is fine)."
+  head=$(git -C "$CMMS_REPO" rev-parse --short HEAD 2>/dev/null || true)
+  if [ "$head" != "$pin" ]; then
+    die "this repo is pinned to cmms $pin but $CMMS_REPO is at ${head:-unknown}. Packing that checkout under version 1.0.0-g$pin would put a different model behind the pinned version, and the load would fail on columns the target does not have. Check out $pin there, or move <CmmsVersion> deliberately."
+  fi
+
+  note "packing cmms $pin from $CMMS_REPO"
+  rm -rf .packages && mkdir -p .packages
+  local log; log=$(mktemp)
+
+  # BUILT ONCE, then packed with --no-build. Three sequential `dotnet pack` runs are not independent:
+  # Cmms.Infrastructure project-references the other two, so packing Domain rewrites output that
+  # Infrastructure's incremental state was resting on, and the third pack then failed with
+  #   NU5026: The file '...Cmms.Infrastructure.runtimeconfig.json' to be packed was not found on disk.
+  # on a warm tree while succeeding on a cold one. An operator hits that as an intermittent failure whose
+  # message names a file nobody asked about. Building the whole set first makes the packs independent.
+  #
+  # The version goes to BOTH commands. --no-build packs what the build produced, so a version passed only
+  # to pack would name one thing and contain another.
+  if ! dotnet build "$CMMS_REPO/src/Cmms.Infrastructure" -c Release -p:Version="1.0.0-g$pin" >"$log" 2>&1; then
+    tail -20 "$log" >&2
+    die "building cmms $pin from $CMMS_REPO failed (full log: $log)."
+  fi
+  for proj in Cmms.Domain Cmms.Application Cmms.Infrastructure; do
+    if ! dotnet pack "$CMMS_REPO/src/$proj" -c Release -p:Version="1.0.0-g$pin" --no-build -o .packages >"$log" 2>&1; then
+      tail -20 "$log" >&2
+      die "packing $proj from $CMMS_REPO failed (full log: $log)."
+    fi
+  done
+  rm -f "$log"
+  ok "packed Cmms.Domain, Cmms.Application, Cmms.Infrastructure at 1.0.0-g$pin"
+}
+
 FORCE_BUILD="${FORCE_BUILD:-0}"
 build_if_absent() {
   local repo="$1" dockerfile="$2" found
@@ -115,14 +175,10 @@ build_if_absent() {
   # CAPTURED. `az acr build` streams the whole remote Docker build, hundreds of layer lines, and on a
   # success not one of them is information. On a failure every one of them is, so they go to a file the
   # die names rather than to the screen.
-  [ -n "${NUGET_TOKEN:-}" ] || die "building ${repo}:${IMAGE_TAG} needs a token that can read the Cmms.* packages from GitHub Packages, and none was found. Run 'gh auth login' (the script reads 'gh auth token'), or export NUGET_TOKEN=<PAT with read:packages>. Without it the remote build fails on a restore 401 after uploading the context."
+  pack_pinned_cmms
   note "building ${repo}:${IMAGE_TAG} (remote, a few minutes)"
   local log; log=$(mktemp)
-  # --secret-build-arg, never --build-arg. The image restores Cmms.Infrastructure from a private feed
-  # (lnicoara/cmms#3026), so a read:packages token has to reach the remote build. A build arg is recorded
-  # in image history and `docker history` prints it; a secret build arg is not recorded at all.
-  if ! az acr build --registry "$ACR" --image "${repo}:${IMAGE_TAG}" --file "$dockerfile" \
-       --secret-build-arg "NUGET_TOKEN=${NUGET_TOKEN}" . >"$log" 2>&1; then
+  if ! az acr build --registry "$ACR" --image "${repo}:${IMAGE_TAG}" --file "$dockerfile" . >"$log" 2>&1; then
     tail -30 "$log" >&2
     die "building ${repo}:${IMAGE_TAG} failed (full log: $log)."
   fi
@@ -202,18 +258,6 @@ esac
 # The name follows the directory unless the operator overrode it. Deriving it rather than defaulting it
 # means the staged prefix and the local directory always agree without a second thing to keep in sync.
 [ -n "$PROFILE" ] || PROFILE="$(basename "$ARTIFACT_DIR")"
-
-# The credential the image build restores Cmms.Infrastructure with (lnicoara/cmms#3026).
-#
-# DERIVED before it is demanded. `gh auth token` is already on this machine for anyone who works on these
-# repos, and a script that stops to tell you to export a variable it could have read is a script that
-# failed at the one thing it could have done for you. An explicit NUGET_TOKEN still wins, for CI or for a
-# token with different scopes.
-#
-# Only needed when a build actually runs. A repeat load at the same commit reuses the image in the
-# registry, so a missing token must not stop a run that was never going to build anything: the check sits
-# in build_if_absent, past the point where the build is known to be necessary.
-NUGET_TOKEN="${NUGET_TOKEN:-$(gh auth token 2>/dev/null || true)}"
 
 command -v az >/dev/null || die "az CLI not found."
 [ -f infra/load-job.bicep ] || die "run from the repo root (infra/load-job.bicep not found)."

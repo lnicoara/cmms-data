@@ -43,9 +43,11 @@ migration job. That step ran on every invocation and is why pre-prod's schema sa
 application it was serving: a load test was deciding what the environment ran. The conformance suite fails
 if it comes back. If a load is refused for pending migrations, run the migration deliberately.
 
-Building the image needs a token that can read `Cmms.*` from GitHub Packages. The script reads
-`gh auth token` and falls back to `NUGET_TOKEN`, and passes it as a `--secret-build-arg` so it is not
-recorded in image history.
+Building the image needs no credential. The script packs `Cmms.Domain`, `Cmms.Application` and
+`Cmms.Infrastructure` out of your cmms checkout (`CMMS_REPO`, default `~/git/cmms`) into `.packages/` in
+the build context, moments before the image is built. It **refuses** if that checkout is not at the commit
+`<CmmsVersion>` pins: packing a different one under that version puts a different model behind it, the
+build still succeeds, and the artifact then fits nothing.
 
 Its preflights exist because each has already failed a real run: a dirty tree scoped to the paths that
 reach the image, the tenant database existing, the artifact matching the pinned model, the staged copy

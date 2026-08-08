@@ -49,12 +49,18 @@ deploy path, not load testing, and they live in `cmms`.
 
 ## Building
 
-Needs a token that can read `Cmms.*` from GitHub Packages:
+Needs `Cmms.*` in `../.packages/`, packed out of a cmms checkout at the pinned commit.
+`scripts/pre-prod/load-pre-prod.sh` does that automatically before it builds the image; by hand:
 
 ```bash
-dotnet nuget update source github -u <you> -p <PAT with read:packages> --store-password-in-clear-text
+dotnet pack <cmms>/src/Cmms.Infrastructure -c Release -p:Version=1.0.0-g<pin> -o ../.packages
 dotnet build ../Cmms.Data.sln -c Release
 ```
 
-`nuget.config` maps `Cmms.*` to that feed and everything else to nuget.org, so a public package taking one
-of these names cannot answer first for tooling that writes directly into a production-shaped database.
+A local folder rather than a hosted feed, because the image builds remotely and a feed would need a
+credential to cross into that build without landing in a layer. This needs none, and it cannot go stale:
+the packages are produced from your checkout seconds before they are consumed.
+
+`nuget.config` maps `Cmms.*` to that folder and everything else to nuget.org, so a public package taking
+one of these names cannot answer first for tooling that writes directly into a production-shaped
+database.
