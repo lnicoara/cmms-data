@@ -28,11 +28,12 @@ STORE=infra/modules/load-test-store.bicep
 ENTRY=tools/Cmms.LoadDataRunner/docker-entrypoint.sh
 RUNNER=tools/Cmms.LoadDataRunner/Program.cs
 DOCKERFILE=tools/Cmms.LoadDataRunner/Dockerfile
+LIB=scripts/pre-prod/lib/output.sh
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok()   { echo "  ok: $*"; }
 
-for f in "$SCRIPT" "$JOB" "$STORE" "$ENTRY" "$RUNNER" "$DOCKERFILE"; do
+for f in "$SCRIPT" "$JOB" "$STORE" "$ENTRY" "$RUNNER" "$DOCKERFILE" "$LIB"; do
   [ -f "$f" ] || fail "$f is missing. The delivery chain is incomplete."
 done
 
@@ -230,6 +231,50 @@ grep -q 'is pinned to cmms $pin but' "$SCRIPT" \
   || fail "$SCRIPT must refuse to pack a cmms checkout that is not at the pinned commit. Packing a different commit under the pinned version is the exact drift the pin exists to prevent, and it fails silently."
 ok "$SCRIPT refuses to pack a checkout that is not at the pin"
 
+echo "== no script may exit silently (lnicoara/cmms#3048) =="
+
+# The rule: a non-zero exit always says why. A silent death already cost a run that had SUCCEEDED
+# (#3047), so this is a floor under the whole class rather than a fix for one line.
+#
+# BEHAVIOURAL, in a separate process. A subshell inside `if !` has errexit suppressed and cannot observe
+# what it is testing, which is how the first guard for #3047 passed while the bug was live.
+grep -q 'trap _output_on_err ERR' "$LIB" \
+  || fail "$LIB must install an ERR trap. Without it, a failing command substitution under set -e kills a script and prints nothing, because a failed grep is silent."
+
+# It must be ERR and NOT EXIT. On bash 3.2, which is what macOS ships and what these run on, merely
+# installing an EXIT trap turns a `set -u` unbound-variable death from exit 1 into exit 0, and the trap
+# reads $? as 0 so it cannot even detect the failure it is masking. A backstop that hides a failure status
+# is worse than the silence it replaced.
+if grep -qE '^trap .* EXIT' "$LIB"; then
+  fail "$LIB installs an EXIT trap. On bash 3.2 that masks a set -u failure as exit 0. Report from ERR, which changes no status."
+fi
+ok "$LIB reports failures from ERR without touching the exit status"
+
+silent=$(mktemp); errout=$(mktemp)
+{ echo '#!/usr/bin/env bash'
+  echo 'set -euo pipefail'
+  echo ". \"$PWD/$LIB\""
+  # The exact shape that shipped: a grep matching nothing, inside a command substitution.
+  echo 'L=$(mktemp); echo irrelevant > "$L"'
+  echo 'X=$(grep -oE "[0-9]+ Done" "$L" | tail -1 | cut -d" " -f1)'
+  echo 'echo SHOULD_NOT_REACH'
+} > "$silent"
+bash "$silent" >/dev/null 2>"$errout" && fail "the probe script was supposed to die and did not; this assertion is testing nothing."
+[ -s "$errout" ] \
+  || fail "a script sourcing $LIB died with an EMPTY stderr. That is the silent exit this rule forbids: an operator cannot tell it from a completed run."
+grep -q 'FAILED' "$errout" \
+  || fail "a script sourcing $LIB died without a FAILED line. It wrote: $(head -c 200 "$errout")"
+rm -f "$silent" "$errout"
+ok "a set -e death reports which command failed, on which line"
+
+# And a clean run must stay quiet, or the backstop becomes noise people learn to skip.
+quiet=$(mktemp); qout=$(mktemp)
+{ echo '#!/usr/bin/env bash'; echo 'set -euo pipefail'; echo ". \"$PWD/$LIB\""; echo 'ok "worked"'; } > "$quiet"
+bash "$quiet" >/dev/null 2>"$qout" || fail "a clean script sourcing $LIB exited non-zero."
+[ -s "$qout" ] && fail "a successful run wrote to stderr: $(head -c 200 "$qout"). The backstop must be silent when nothing failed."
+rm -f "$quiet" "$qout"
+ok "a clean run stays quiet"
+
 echo "== reporting on the work cannot fail the work (lnicoara/cmms#3047) =="
 
 # Under `set -e` an assignment carries the exit status of its command substitution, so
@@ -274,7 +319,6 @@ echo "== the operator scripts share one output style (lnicoara/cmms#3046) =="
 # One definition in lib/output.sh, sourced by each, rather than the same twenty lines pasted three times
 # and drifting. The sourcing resolves from the script's own location so it survives being run from any
 # directory, which a `. lib/output.sh` relative to the working directory would not.
-LIB=scripts/pre-prod/lib/output.sh
 [ -f "$LIB" ] || fail "$LIB is missing; every operator script sources it for colour, phase headers and die()."
 for op in scripts/pre-prod/*.sh; do
   [ -f "$op" ] || continue

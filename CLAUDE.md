@@ -55,7 +55,13 @@ reference is the commit pre-prod runs. Measuring against `main` produces a numbe
    settled by promoting a commit. The load script does not build, deploy, or start the migration job, and a
    conformance test fails if that comes back. If a load is refused for pending migrations, run the
    migration deliberately; never migrate a target to fit an artifact.
-7. **The load deletes nothing** (#3025). It is named for loading. `--clear-target` is gone and the script
+7. **No script exits silently** (#3048). A non-zero exit always says why. `lib/output.sh` installs an
+   `ERR` trap that names the failing command and its line, because `VAR=$(pipeline)` under `set -euo
+   pipefail` dies when the pipeline fails and prints nothing, and that once ended a *successful* upload at
+   a bare prompt (#3047). It reports from `ERR` and never `EXIT`: on bash 3.2, which is what macOS ships,
+   installing an `EXIT` trap turns a `set -u` death from exit 1 into exit 0. A backstop that masks a
+   failure status is worse than the silence it replaced.
+8. **The load deletes nothing** (#3025). It is named for loading. `--clear-target` is gone and the script
    refuses it with an explanation. The loader loads on top of whatever is already there, which for a load
    test is more rows under load and therefore the point.
 

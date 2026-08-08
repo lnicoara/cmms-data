@@ -93,6 +93,19 @@ Its preflights exist because each has already failed a real run: a dirty tree sc
 reach the image, the tenant database existing, the artifact matching the pinned model, the staged copy
 being the one just uploaded, and the deployed job carrying both the digest just built and no clear target.
 
+## What is deliberately NOT here
+
+`pre-flight/`. Four sourced check scripts (`01-required-tools.sh` through `04-no-active-operation.sh`)
+arrived with the snapshot and were carried through the move without their caller. They are sourced by
+`deploy-pre-prod.sh`, which stayed in `cmms` because the deploy path is not load testing
+(lnicoara/cmms#3037), and `cmms` already has its own copies where they are used.
+
+They were worse than dead weight. `02-azure-login.sh` referenced an `azt` helper and `04-no-active-operation.sh`
+referenced `$APP` and a `run` helper, none of which any script here defines. Anyone reading this directory
+would reasonably conclude the load scripts run those checks. They never did. Deleted in lnicoara/cmms#3049.
+
+The load and generate scripts carry their own preflights inline, each with a recorded reason for existing.
+
 ## infra/
 
 | template | what it stands up |
