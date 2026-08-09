@@ -1,3 +1,4 @@
+using Microsoft.Data.SqlClient;
 using System.IO.Compression;
 using System.Text.Json;
 
@@ -11,6 +12,13 @@ public sealed class LoadReport
     public int ChunksLoaded { get; set; }
     public int ChunksSkipped { get; set; }
     public int ChunksHealed { get; set; }
+
+    // Chunks abandoned because the rows they carry are ALREADY in the target under the same primary keys.
+    // Counted rather than fatal (lnicoara/cmms#3054): a duplicate key is the one bulk-copy failure that
+    // means "this work is already done", so ending a multi-hour load over it destroys hours of completed
+    // work to avoid re-doing a fraction of a second of it.
+    public int ChunksDuplicate { get; set; }
+    public long RowsDuplicate { get; set; }
 
     // Printed AS IT HAPPENS, not collected for the caller to print when the run ends. A load takes hours,
     // and buffering meant a running job and a hung job produced identical output: none. One hung for 8
@@ -261,7 +269,35 @@ public sealed class Loader
                 // probing: it loads what is missing and skips what is not.
                 if (landed[t.Table].Contains(chunk.Number)) { report.ChunksSkipped++; continue; }
 
-                await _target.CopyChunkAsync(t.Table, t.Binders, chunk.Path, chunk.Rows, _options.BatchSize, ct);
+                // A DUPLICATE KEY IS NOT A REASON TO END THE LOAD (lnicoara/cmms#3054).
+                //
+                // Every other bulk-copy failure says the load cannot proceed. This one says the opposite:
+                // these exact rows, under these exact primary keys, are already in the target. Keys are a
+                // pure function of (seed, kind, ordinal), so a collision means this chunk's work exists.
+                // Ending an hours-long run over it throws away everything already loaded in order to avoid
+                // re-doing something that does not need doing.
+                //
+                // Seen on a real run at 10.7 million AuditEvents rows in, which is the shape of the
+                // problem: the further a load gets, the more it costs to abandon, and duplicates surface
+                // late because the big tables load last.
+                //
+                // NOT checkpointed as complete. A checkpoint means "this loader put these rows here", and
+                // that would be a lie the next resume acts on. Reported and counted instead, so a run that
+                // skipped chunks says so and the operator decides whether a target holding rows from
+                // another dataset is what they wanted.
+                try
+                {
+                    await _target.CopyChunkAsync(t.Table, t.Binders, chunk.Path, chunk.Rows, _options.BatchSize, ct);
+                }
+                catch (SqlException ex) when (IsDuplicateKey(ex))
+                {
+                    report.ChunksDuplicate++;
+                    report.RowsDuplicate += chunk.Rows;
+                    report.Say(
+                        $"  duplicate: {t.Table} chunk {chunk.Number} ({chunk.Rows:N0} rows) is already " +
+                        $"present under the same keys; skipping it and continuing. {FirstLine(ex.Message)}");
+                    continue;
+                }
                 await _checkpoints.MarkCompleteAsync(t.Table, chunk.Number, Detail(chunk, "loaded"), ct);
 
                 report.ChunksLoaded++;
@@ -274,6 +310,57 @@ public sealed class Loader
         report.Say(
             $"{report.RowsLoaded:N0} rows loaded in {report.ChunksLoaded:N0} chunks " +
             $"({report.ChunksSkipped:N0} already checkpointed, {report.ChunksHealed:N0} healed)");
+
+        // Said separately and last, so it is not a clause inside a line that otherwise reads like success.
+        // A load that skipped chunks did NOT put every row of the artifact in the target, and the operator
+        // has to know that before drawing a conclusion from a query against it.
+        if (report.ChunksDuplicate > 0)
+            report.Say(
+                $"{report.ChunksDuplicate:N0} chunk(s) totalling {report.RowsDuplicate:N0} rows were already " +
+                "present under the same primary keys and were skipped. The target therefore holds those rows " +
+                "from an earlier load rather than from this one, and this artifact is not fully represented. " +
+                "Clear the tenant first if you need exactly this dataset and nothing else.");
+    }
+
+    /// <summary>
+    /// Whether a SqlException is a primary-key or unique-index violation, and nothing else.
+    ///
+    /// Matched on ERROR NUMBER, never on message text: 2627 is a constraint violation and 2601 a duplicate
+    /// key in a unique index. The text is localised and reworded between server versions, so a substring
+    /// match on "duplicate key" would quietly stop matching on a server whose language nobody changed on
+    /// purpose, and this is the check that decides whether an hours-long load survives.
+    ///
+    /// SqlException carries one entry per error, and a batch can report several, so every one has to be a
+    /// duplicate before the chunk is treated as already-present. A batch that hit a duplicate AND something
+    /// else is not a chunk that was already done.
+    /// </summary>
+    private static bool IsDuplicateKey(SqlException ex)
+    {
+        // 2627 constraint violation, 2601 duplicate key in a unique index. 3621 is "The statement has been
+        // terminated", which SQL Server always raises ALONGSIDE the real error and never on its own.
+        //
+        // That companion is why the first version of this did not work. It required every error in the
+        // collection to be a duplicate, and a PK violation arrives as {2627, 3621}, so the guard rejected
+        // the exact exception it was written for and the load still died. The test caught it; reading the
+        // code did not.
+        var sawDuplicate = false;
+        foreach (SqlError err in ex.Errors)
+        {
+            switch (err.Number)
+            {
+                case 2627:
+                case 2601: sawDuplicate = true; break;
+                case 3621: break;                  // the statement-terminated companion, never alone
+                default: return false;             // anything else means this batch failed for another reason too
+            }
+        }
+        return sawDuplicate;
+    }
+
+    private static string FirstLine(string message)
+    {
+        var i = message.IndexOfAny(new[] { '\r', '\n' });
+        return i < 0 ? message : message[..i];
     }
 
     private static string Detail(ChunkRef chunk, string how) =>

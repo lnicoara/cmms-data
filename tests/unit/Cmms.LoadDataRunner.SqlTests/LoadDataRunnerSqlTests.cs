@@ -184,6 +184,85 @@ public sealed class LoadDataRunnerSqlTests : IClassFixture<LoadSqlEdgeFixture>, 
             Assert.Equal(0, await CountAsync(table));
     }
 
+    // lnicoara/cmms#3054. A duplicate key is the ONE bulk-copy failure that means "this work is already
+    // done", and ending a multi-hour load over it destroys hours of completed work to avoid re-doing a
+    // fraction of a second of it. Seen for real at 10.7 million AuditEvents rows in.
+    //
+    // The scenario has to be built precisely, because the loader is good at NOT reaching this. Preflight
+    // probes three keys per chunk (first, middle, last): all present adopts the chunk as already-landed,
+    // some present is a partial-chunk refusal, none present means load it. So a duplicate arrives only when
+    // every PROBED key is absent while other rows in the chunk are present, which is what deleting exactly
+    // the probed rows reproduces. Simply loading twice does not do it; the probe adopts everything and no
+    // insert is ever attempted.
+    //
+    // Against real SQL because that is the only place a PRIMARY KEY violation exists. A mocked
+    // SqlException would assert that this code catches an exception it constructed itself.
+    [SkippableFact]
+    public async Task A_chunk_whose_rows_are_already_present_is_skipped_and_the_load_continues()
+    {
+        Skip.IfNot(_fx.Available, _fx.SkipReason);
+
+        var dir = BuildArtifact("dupes");
+        var artifact = Artifact.Open(dir);
+
+        var first = await RunAsync(dir, execute: true, new MemoryCheckpointStore());
+        Assert.True(first.Ok, string.Join("\n", first.Lines));
+        var loadedOnce = await CountAsync("AuditEvents");
+        Assert.Equal(artifact.RowsFor("AuditEvents"), loadedOnce);
+
+        // Now construct the ONE condition that actually reaches the duplicate path, because the loader is
+        // good at not reaching it. Preflight probes three keys per chunk (first, middle, last): all present
+        // adopts the chunk, some present is a partial-chunk refusal, none present means load it. So a
+        // duplicate needs every PROBED key absent while a NON-sampled row is present.
+        //
+        // Start from an empty table and insert exactly one row, taking its Id from line index 1 of a chunk
+        // — the second row, which the probe never samples.
+        await using (var conn = new SqlConnection(Conn()))
+        {
+            await conn.OpenAsync();
+            await using var wipe = conn.CreateCommand();
+            wipe.CommandText = "DELETE FROM [AuditEvents]";
+            await wipe.ExecuteNonQueryAsync();
+        }
+
+        var chunkPath = Directory.GetFiles(Path.Combine(dir, "AuditEvents"), "AuditEvents-*.jsonl.gz")
+            .OrderBy(x => x, StringComparer.Ordinal).First();
+        string secondRow;
+        using (var gz = new GZipStream(File.OpenRead(chunkPath), CompressionMode.Decompress))
+        using (var reader = new StreamReader(gz))
+        {
+            await reader.ReadLineAsync();                       // index 0, which IS probed
+            secondRow = (await reader.ReadLineAsync())!;        // index 1, which is not
+        }
+        var collidingId = JsonDocument.Parse(secondRow).RootElement.GetProperty("Id").GetGuid();
+
+        await using (var db = _fx.NewContext())
+        {
+            db.Set<Cmms.Domain.Auditing.AuditEvent>().Add(new Cmms.Domain.Auditing.AuditEvent
+            {
+                Id = collidingId,
+                OccurredAtUtc = DateTimeOffset.UtcNow,
+                EntityType = "WorkOrder",
+                EntityId = Guid.NewGuid().ToString(),
+            });
+            await db.SaveChangesAsync();
+        }
+        Assert.Equal(1, await CountAsync("AuditEvents"));
+
+        // Empty checkpoints, so the loader believes it has everything to do.
+        var second = await RunAsync(dir, execute: true, new MemoryCheckpointStore());
+
+        // It must FINISH rather than end on the first collision, which is what it did before this change.
+        Assert.True(second.Ok, string.Join("\n", second.Lines));
+        Assert.True(second.ChunksDuplicate > 0,
+            "expected duplicate chunks to be reported; got none, so the collision never happened and this " +
+            "test is not exercising what it claims. Lines:\n" + string.Join("\n", second.Lines));
+
+        // Said out loud, and as its own warning rather than folded into a line that reads like success.
+        Assert.Contains(second.Lines, l => l.Contains("duplicate:") && l.Contains("skipping it and continuing"));
+        Assert.Contains(second.Lines, l => l.Contains("not fully represented"));
+    }
+
     // lnicoara/cmms#2993, replacing Refuses_a_target_whose_tables_are_not_empty.
     //
     // Grill round 4 made "this table holds rows I did not write" a refusal, under the rule that the artifact
@@ -520,18 +599,5 @@ public sealed class LoadDataRunnerSqlTests : IClassFixture<LoadSqlEdgeFixture>, 
     /// a crash between the chunk's commit and its checkpoint is reproduced deterministically rather than
     /// by trying to kill the loader at the right microsecond.
     /// </summary>
-    private sealed class MemoryCheckpointStore : ICheckpointStore
-    {
-        private readonly HashSet<string> _done = new(StringComparer.Ordinal);
-        public bool Forget { get; init; }
 
-        public Task<bool> IsCompleteAsync(string table, int chunk, CancellationToken ct) =>
-            Task.FromResult(_done.Contains($"{table}/{chunk}"));
-
-        public Task MarkCompleteAsync(string table, int chunk, string detail, CancellationToken ct)
-        {
-            if (!Forget) _done.Add($"{table}/{chunk}");
-            return Task.CompletedTask;
-        }
-    }
 }
