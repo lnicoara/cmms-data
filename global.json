@@ -1,0 +1,20 @@
+{
+  // Pins the build to the .NET 8 SDK band so a laptop and the Docker image
+  // (mcr.microsoft.com/dotnet/sdk:8.0) compile the same IL. Without this a machine's newer preinstalled
+  // SDK wins and LangVersion=latest changes overload resolution, which in cmms was a real crash
+  // (array.Contains resolving to MemoryExtensions.Contains, lnicoara/cmms#1434).
+  // rollForward latestFeature stays within 8.0.x: any installed 8.0 feature band satisfies it, and a
+  // 9.x-only machine fails fast instead of silently diverging. lnicoara/cmms#1437.
+  //
+  // Carried over when the load tooling moved here (lnicoara/cmms#3026). It was left behind, and the
+  // Dockerfile still copied it, so every image build died with
+  //   COPY failed: file not found in build context: stat global.json: file does not exist
+  // after uploading the artifact and pulling the SDK image. lnicoara/cmms#3052.
+  //
+  // It matters MORE here than in cmms, not less: the model is a pinned package built elsewhere, so this
+  // file is the only thing pinning the compiler that consumes it.
+  "sdk": {
+    "version": "8.0.100",
+    "rollForward": "latestFeature"
+  }
+}

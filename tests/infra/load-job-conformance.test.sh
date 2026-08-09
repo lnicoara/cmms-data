@@ -240,6 +240,38 @@ grep -q 'CMMS_VERSION="1.0.0-g$commit"' "$SCRIPT" \
   || fail "$SCRIPT must derive the package version from the commit it just packed. A version from anywhere else can name a build the packages are not."
 ok "$SCRIPT derives the version from the commit it packed"
 
+echo "== everything the image COPYs actually exists (lnicoara/cmms#3052) =="
+
+# A COPY naming a path the build context does not have fails REMOTELY, after `az acr build` has uploaded
+# the context and pulled the SDK image. Roughly two minutes, and the message names a filename with no hint
+# that the file was never in this repository at all:
+#
+#   COPY failed: file not found in build context: stat global.json: file does not exist
+#
+# That is what happened: global.json pins the SDK band and stayed behind in cmms when the tooling moved,
+# while the Dockerfile kept copying it. Every image build died the same way. Checkable here in
+# milliseconds, so there is no reason for it to be discovered in Azure.
+#
+# .packages/ is exempt, and only that: the load script creates it immediately before the build by packing
+# cmms at pre-prod's commit, so it is legitimately absent from a clean checkout.
+while IFS= read -r src; do
+  case "$src" in
+    .packages/|.packages) continue ;;
+  esac
+  [ -e "$src" ] \
+    || fail "$DOCKERFILE copies '$src', which does not exist in this repository. The build would upload the context, pull the SDK image, and only then fail with a message naming the file but not the reason."
+done < <(grep -E '^COPY ' "$DOCKERFILE" | grep -v -- '--from=' | awk '{print $2}')
+ok "every path $DOCKERFILE copies is present"
+
+# The SDK pin specifically, because losing it is silent rather than loud. The model arrives as a package
+# built elsewhere, so this file is the only thing pinning the compiler that consumes it, and a newer SDK
+# with LangVersion=latest changes overload resolution (lnicoara/cmms#1434).
+[ -f global.json ] \
+  || fail "global.json is missing. It pins the SDK band for both a laptop and the image; without it a machine's newer preinstalled SDK wins and compiles different IL from the same source."
+grep -q 'rollForward' global.json \
+  || fail "global.json does not set rollForward, so it pins one exact patch and fails on any other 8.0 feature band rather than accepting it."
+ok "global.json pins the SDK band"
+
 echo "== the pin is read from pre-prod, never from the operator (lnicoara/cmms#3050) =="
 
 CLONER=scripts/pre-prod/clone-cmms-from-pre-prod.sh
