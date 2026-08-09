@@ -90,9 +90,66 @@ mkdir -p "$(dirname "$OUT")"
 # For 'small' the wrong seed shows up in the manifest and anyone reading it sees the mistake. Here the seed
 # is RIGHT and only the counts are wrong, so the manifest looks correct. Named explicitly, and the row
 # count is asserted below rather than trusted.
+# RUN IT IN THE BACKGROUND AND REPORT WHILE IT WORKS (lnicoara/cmms#3053).
+#
+# The generator prints a banner, then says nothing at all until it is finished. For 'small' that is
+# fifteen seconds and nobody notices. For 'full' it is an hour of blank terminal, which is
+# indistinguishable from a hang, and the natural response to a hang is Ctrl-C on a run that was fine.
+#
+# The progress is derived from the OUTPUT DIRECTORY rather than from anything the generator says, which
+# means it reports work that actually landed on disk instead of a claim about work. It also needs no change
+# to the generator, so this improves a run you can start today.
+GEN_LOG=$(mktemp)
 GENERATOR_PARAMS=full.json dotnet run --project tools/Cmms.LoadDataGenerator -c Release \
-  --no-launch-profile -- --OutDir="$OUT" \
-  || die "generation failed."
+  --no-launch-profile -- --OutDir="$OUT" >"$GEN_LOG" 2>&1 &
+GEN_PID=$!
+
+GEN_START=$(date +%s)
+LAST_BYTES=0
+while kill -0 "$GEN_PID" 2>/dev/null; do
+  sleep 10
+  kill -0 "$GEN_PID" 2>/dev/null || break
+
+  now=$(date +%s); elapsed=$((now - GEN_START))
+  # || true throughout: this is the REPORT on the work, and a report must never be able to fail the work
+  # (lnicoara/cmms#3047). du on a directory mid-write, or find racing a file being renamed, are both
+  # ordinary and neither is a reason to kill an hour-long generation.
+  bytes=$(du -sk "$OUT" 2>/dev/null | awk '{print $1}' || true); bytes=${bytes:-0}
+  files=$(find "$OUT" -type f -name '*.jsonl.gz' 2>/dev/null | wc -l | tr -d ' ' || true); files=${files:-0}
+  tables=$(find "$OUT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ' || true); tables=${tables:-0}
+  # Which table it is on now, taken from the most recently written chunk. More useful than a percentage
+  # this cannot honestly compute: table sizes differ by four orders of magnitude, so "61 of 158 files" says
+  # very little about how much work remains, while "now writing WorkOrders" says a great deal.
+  newest=$(ls -t "$OUT"/*/*.jsonl.gz 2>/dev/null | head -1 || true)
+  newest_table=$([ -n "$newest" ] && basename "$(dirname "$newest")" || echo "starting")
+
+  rate=$(( (bytes - LAST_BYTES) / 10 )); LAST_BYTES=$bytes
+  human=$(awk -v k="$bytes" 'BEGIN{ if (k>1048576) printf "%.1f GB", k/1048576; else if (k>1024) printf "%.0f MB", k/1024; else printf "%d KB", k }')
+
+  # One line rewritten in place on a terminal; one line per tick when piped, because a carriage return in
+  # a log file is an unreadable smear.
+  if [ -t 1 ]; then
+    printf '\r  %s%02d:%02d:%02d%s  %-10s %-5s files  %-22s %s KB/s   ' \
+      "$C_DIM" $((elapsed/3600)) $(((elapsed%3600)/60)) $((elapsed%60)) "$C_RESET" \
+      "$human" "$files" "$newest_table" "$rate"
+  else
+    printf '  %02d:%02d:%02d  %s across %s files in %s tables, writing %s\n' \
+      $((elapsed/3600)) $(((elapsed%3600)/60)) $((elapsed%60)) "$human" "$files" "$tables" "$newest_table"
+  fi
+done
+[ -t 1 ] && printf '\r%*s\r' 78 ''
+
+# wait returns the generator's status. Handled with || so errexit does not fire before the log is shown:
+# an hour of work failing must print WHY, not just stop (lnicoara/cmms#3048).
+if ! wait "$GEN_PID"; then
+  tail -30 "$GEN_LOG" >&2
+  rm -f "$GEN_LOG"
+  die "generation failed (output above)."
+fi
+# The generator's own summary: per-table row counts and the self-validation report. Printed now rather
+# than streamed, so it is not interleaved with the progress line above.
+cat "$GEN_LOG"
+rm -f "$GEN_LOG"
 
 # ---- The artifact must be the FULL one, not the defaults wearing its seed ---------------------------
 # Asserting the outcome, not the gate. Passing GENERATOR_PARAMS is the gate; the row count is the outcome,
