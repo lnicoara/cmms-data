@@ -102,4 +102,27 @@ public class CommandLineTests
         Assert.True(o.Execute);
         Assert.False(o.VerifyArtifactOnly);
     }
+
+    // lnicoara/cmms#3055. --clear-only is a stopping point, not a shortcut past the delete fence, so it
+    // parses as its own flag and changes nothing about what else is required.
+    [Fact]
+    public void Clear_only_parses_and_does_not_imply_permission_to_delete()
+    {
+        var o = new LoaderOptions();
+        Assert.Null(CommandLine.Parse(new[] { "--clear-only" }, o));
+
+        Assert.True(o.ClearOnly);
+        // Neither of the two yeses is granted by asking for a clear-only run. Program refuses without both,
+        // and refuses again unless the slug matches the tenant it resolved from the catalog.
+        Assert.False(o.Execute);
+        Assert.Equal("", o.ClearTargetSlug);
+    }
+
+    [Fact]
+    public void Clear_only_is_off_unless_asked_for()
+    {
+        var o = new LoaderOptions();
+        Assert.Null(CommandLine.Parse(new[] { "--execute", "--clear-target=demo-health" }, o));
+        Assert.False(o.ClearOnly);
+    }
 }

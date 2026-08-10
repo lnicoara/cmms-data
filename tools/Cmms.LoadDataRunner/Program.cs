@@ -99,7 +99,10 @@ if (parseError is not null)
     return 1;
 }
 
-if (string.IsNullOrWhiteSpace(options.Artifact))
+// --clear-only needs no artifact, and requiring one would be the whole problem it exists to fix: emptying
+// a tenant would mean staging gigabytes of a dataset nobody wants in order to reach the delete that runs
+// before it. lnicoara/cmms#3055.
+if (string.IsNullOrWhiteSpace(options.Artifact) && !options.ClearOnly)
 {
     Console.Error.WriteLine("--artifact=<dir> is required (the directory holding manifest.json).");
     return 1;
@@ -123,6 +126,19 @@ if (!string.IsNullOrWhiteSpace(options.ClearTargetSlug) &&
         $"--clear-target names '{options.ClearTargetSlug.Trim()}' but the target tenant is '{slug}'. " +
         "Clearing deletes every row the artifact owns, so it must name the tenant it is about to empty. " +
         "Refusing.");
+    return 1;
+}
+
+// --- Guard: --clear-only is a stopping point, not a shortcut past the delete fence. ---
+// It still needs --clear-target=<slug> AND --execute, exactly as a clear before a load does. Without this
+// a flag that merely says "clear only" would delete on its own, which is the one-flag delete that the
+// two-value fence exists to prevent (lnicoara/cmms#2908 grill round 3).
+if (options.ClearOnly && string.IsNullOrWhiteSpace(options.ClearTargetSlug))
+{
+    Console.Error.WriteLine(
+        "--clear-only still needs --clear-target=<slug> naming the tenant it empties. Deleting every row " +
+        "in a tenant is not something a flag should be able to do while saying only that it is the whole " +
+        "job. Refusing.");
     return 1;
 }
 
@@ -223,11 +239,48 @@ catch (Exception ex)
 var phase = "opening the artifact";
 try
 {
-    var artifact = Artifact.Open(options.Artifact);
     using var model = new ModelBridge();
-    var plan = LoadPlan.Build(artifact, model);
-
     var target = new TargetDatabase(conn, options.TimeoutSeconds);
+
+    // --- Clear the tenant and stop. lnicoara/cmms#3055. ---
+    //
+    // Every table in the MODEL, not an artifact's. "Empty this tenant" is not a question about a dataset,
+    // and clearing to an artifact's shape would leave rows behind for a reason nobody reading the output
+    // could see. It also means no artifact is opened, staged or downloaded, which is the point: emptying a
+    // tenant should not require gigabytes of data nobody wants.
+    //
+    // Everything above this line still applies: the tenant is in the catalog and Active, its secret names
+    // its OWN database on THIS environment's server, migrations are current, and the clear slug matches
+    // the resolved tenant. A DELETE has more need of those guards than a load does.
+    if (options.ClearOnly)
+    {
+        phase = "CLEARING";
+        Console.WriteLine();
+        var wipe = await TargetCleaner.ClearAsync(
+            model.AllTableNames(), model, target, options.Execute, CancellationToken.None,
+            table => phase = $"CLEARING, emptying [{table}]");
+
+        if (wipe.Executed)
+        {
+            phase = "restoring the preserved login";
+            var kept = await TargetCleaner.RestorePreservedAsync(target, wipe, CancellationToken.None);
+            Console.WriteLine();
+            Console.WriteLine(kept > 0
+                ? $"cleared. {kept} login(s) [{string.Join(", ", TargetCleaner.PreservedUsernames)}] were held " +
+                  "aside and restored, so this tenant is still reachable."
+                : "cleared. NOTE: no preserved login existed here, so nothing was restored and this tenant " +
+                  "may have no working account.");
+        }
+        else
+        {
+            Console.WriteLine();
+            Console.WriteLine("PLAN ONLY: nothing was deleted. Pass --execute to clear.");
+        }
+        return 0;
+    }
+
+    var artifact = Artifact.Open(options.Artifact);
+    var plan = LoadPlan.Build(artifact, model);
 
     // --- Optional, separately flagged, destructive: empty the artifact's write set. ---
     //

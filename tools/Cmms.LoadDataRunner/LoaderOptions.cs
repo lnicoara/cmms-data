@@ -50,6 +50,23 @@ public sealed class LoaderOptions
     public string ClearTargetSlug { get; set; } = "";
 
     /// <summary>
+    /// Empty the tenant and STOP, loading nothing. lnicoara/cmms#3055.
+    ///
+    /// Clearing already existed but only as a prelude to a load, so emptying pre-prod meant loading a
+    /// dataset you did not want in order to reach the delete that ran first. This makes the delete the
+    /// whole job.
+    ///
+    /// It does NOT loosen the fence. <see cref="ClearTargetSlug"/> and <see cref="Execute"/> are both still
+    /// required, and the slug must still match the resolved tenant, so this adds a way to stop early rather
+    /// than a way to delete more easily.
+    ///
+    /// No artifact is needed or read. The table set comes from the EF model, which is the right source for
+    /// "empty this tenant": an artifact's tables are whatever that dataset happened to carry, and clearing
+    /// to that shape would leave rows behind for a reason nobody could see.
+    /// </summary>
+    public bool ClearOnly { get; set; }
+
+    /// <summary>
     /// Validate the ARTIFACT and exit, touching no database at all.
     ///
     /// This exists because artifact verification and target preflight are different questions that were
