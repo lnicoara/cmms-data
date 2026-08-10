@@ -55,7 +55,13 @@ echo "    ${avail_mb} MB free, need ${required_mb} MB"
 # --recursive mirrors the <table>/<table>-NNNNN.jsonl.gz layout. --overwrite=ifSourceNewer makes a re-run
 # after a restart cheap instead of re-pulling 3.7 GB, which matters because the loader is resumable and a
 # retried job should not spend its first many minutes re-downloading what it already has.
-azcopy copy "${ARTIFACT_BLOB_URL}/*" "${ARTIFACT_DIR}/" --recursive --overwrite=ifSourceNewer
+# Skipped entirely for a clear-only job: there is no artifact to stage, and pulling one would be minutes
+# spent fetching data the run will never open. lnicoara/cmms#3055.
+if ! truthy "${LOAD_CLEAR_ONLY:-false}"; then
+  azcopy copy "${ARTIFACT_BLOB_URL}/*" "${ARTIFACT_DIR}/" --recursive --overwrite=ifSourceNewer
+else
+  echo "clear-only: no artifact staged"
+fi
 
 # The chosen pre-prod target is the already-seeded demo-health tenant, whose ServiceLines rows carry the
 # same well-known Guids the artifact ships, so the write set has to be emptied first. Destructive, needs
@@ -66,6 +72,24 @@ azcopy copy "${ARTIFACT_BLOB_URL}/*" "${ARTIFACT_DIR}/" --recursive --overwrite=
 CLEAR_ARG=""
 if [ -n "${LOAD_CLEAR_TARGET_SLUG:-}" ]; then
   CLEAR_ARG="--clear-target=${LOAD_CLEAR_TARGET_SLUG}"
+fi
+
+# CLEAR ONLY: empty the tenant and stop. lnicoara/cmms#3055.
+#
+# Handled here, before the artifact is even looked at, because that is the whole point: emptying a tenant
+# must not require staging gigabytes of a dataset nobody wants. The download above is skipped for the same
+# reason, so this path touches no blob at all.
+#
+# It still carries both yeses. LOAD_CLEAR_TARGET_SLUG names the tenant and LOAD_EXECUTE has to be true;
+# the runner refuses otherwise, and refuses again if the slug does not match the tenant it resolved.
+if truthy "${LOAD_CLEAR_ONLY:-false}"; then
+  echo
+  if ! truthy "${LOAD_EXECUTE:-false}"; then
+    echo "==> Planning the clear of '${LOAD_TENANT_SLUG}' (deletes nothing)"
+    exec dotnet Cmms.LoadDataRunner.dll --tenant="${LOAD_TENANT_SLUG}" ${CLEAR_ARG} --clear-only
+  fi
+  echo "==> CLEARING '${LOAD_TENANT_SLUG}' (LOAD_EXECUTE=${LOAD_EXECUTE}). Loading nothing."
+  exec dotnet Cmms.LoadDataRunner.dll --tenant="${LOAD_TENANT_SLUG}" ${CLEAR_ARG} --clear-only --execute
 fi
 
 echo

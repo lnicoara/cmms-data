@@ -35,6 +35,14 @@ public static class CommandLine
                 continue;
             }
 
+            // Empty the tenant and stop. lnicoara/cmms#3055. Still requires --clear-target=<slug> and
+            // --execute; this changes what happens AFTER the clear, not whether one is allowed.
+            if (string.Equals(body, "clear-only", StringComparison.OrdinalIgnoreCase))
+            {
+                options.ClearOnly = true;
+                continue;
+            }
+
             // Takes the slug as its VALUE, so a wrong tenant cannot be emptied by a flag that merely says
             // "yes". Program compares it against the resolved tenant and refuses on a mismatch.
             if (body.StartsWith("clear-target=", StringComparison.OrdinalIgnoreCase))

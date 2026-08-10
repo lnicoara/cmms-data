@@ -97,6 +97,38 @@ apart, so the script checks it rather than trusting that the flag was passed.
 minutes per 100,000-row chunk, so 438 chunks need about 51 hours against a 12-hour job timeout.
 lnicoara/cmms#2910 (index posture) is the likely fix. Generating is useful now; loading waits.
 
+## scripts/pre-prod/clear-pre-prod.sh
+
+Empties a pre-prod tenant, **keeping the admin login**.
+
+```bash
+scripts/pre-prod/clear-pre-prod.sh                   # PLAN: says what would go, deletes nothing
+scripts/pre-prod/clear-pre-prod.sh --execute         # actually empties demo-health
+TENANT_SLUG=loadtest scripts/pre-prod/clear-pre-prod.sh --execute
+```
+
+The destructive counterpart to `load-pre-prod.sh`, and a separate script for exactly that reason. A script
+named for loading must not delete on the way past (lnicoara/cmms#3025); a script named for clearing is
+allowed to, because that is what its name promises and what you typed.
+
+**What survives:** the `admin` login and the access group it belongs to. `TargetCleaner` holds them aside
+before the first DELETE and restores them after, so the tenant is still reachable when it finishes. A clear
+that leaves nobody able to sign in has to be recovered with a platform-admin token by hand.
+
+**What goes:** every table in the tenant model, not an artifact's write set. "Empty this tenant" is not a
+question about a dataset, and clearing to some artifact's shape would leave rows behind for a reason nobody
+reading the output could see.
+
+It needs **no artifact** and stages nothing — the job downloads no blob.
+
+**Plan is the default here**, and this is the one script in this repo that keeps that default.
+`load-pre-prod.sh` loads when you type its name because loading is recoverable. This is not: the rows are
+gone, and refilling them means regenerating an artifact (about an hour) and loading it (hours more). So it
+shows you what would happen and `--execute` is a second, deliberate act.
+
+It builds nothing. If `cmms-load:<commit>` is not already in the registry it refuses and tells you to run
+`load-pre-prod.sh` first — a clear should not be the thing that decides which binary pre-prod runs.
+
 ## scripts/pre-prod/load-pre-prod.sh
 
 **It loads.** Typing the name is the intent, so there is no second flag confirming it. `--plan` is the dry

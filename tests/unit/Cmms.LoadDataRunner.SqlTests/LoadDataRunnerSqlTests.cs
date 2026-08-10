@@ -492,6 +492,57 @@ public sealed class LoadDataRunnerSqlTests : IClassFixture<LoadSqlEdgeFixture>, 
         }
     }
 
+    // lnicoara/cmms#3055: clearing the WHOLE tenant, which is what clear-pre-prod.sh asks for, and the
+    // thing that makes it safe to run — the admin login survives.
+    //
+    // Every table in the MODEL, not an artifact's write set. "Empty this tenant" is not a question about a
+    // dataset, and clearing to an artifact's shape would leave rows behind for a reason nobody reading the
+    // output could see.
+    [SkippableFact]
+    public async Task Clearing_every_model_table_empties_the_tenant_but_keeps_the_admin_login()
+    {
+        Skip.IfNot(_fx.Available, _fx.SkipReason);
+
+        var dir = BuildArtifact("wipe");
+        var artifact = Artifact.Open(dir);
+        Assert.True((await RunAsync(dir, execute: true, new MemoryCheckpointStore())).Ok);
+        Assert.True(await CountAsync("WorkOrders") > 0);
+
+        // The login the provisioner and the seed runner both create, and the one an operator actually has.
+        await using (var db = _fx.NewContext())
+        {
+            var group = new Cmms.Domain.Identity.AccessGroup { Id = Guid.NewGuid(), Name = "Administrators" };
+            db.Set<Cmms.Domain.Identity.AccessGroup>().Add(group);
+            db.Set<Cmms.Domain.Identity.User>().Add(new Cmms.Domain.Identity.User
+            {
+                Id = Guid.NewGuid(),
+                Username = "admin",
+                PasswordHash = "not-a-real-hash",
+                DefaultAccessGroupId = group.Id,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        using var model = new ModelBridge();
+        var target = new TargetDatabase(Conn(), 120);
+        var wipe = await TargetCleaner.ClearAsync(
+            model.AllTableNames(), model, target, execute: true, CancellationToken.None);
+
+        Assert.True(wipe.Executed);
+
+        // Checked BEFORE the restore, deliberately. The clear empties everything including Users, and the
+        // login comes back afterwards, so asserting emptiness after the restore would fail on the very row
+        // that is supposed to survive and would say nothing about whether the clear worked.
+        foreach (var t in artifact.Tables) Assert.Equal(0, await CountAsync(t));
+
+        // And the tenant is still reachable, which is the whole point of preserving the login: a clear that
+        // leaves nobody able to sign in has to be recovered with a platform-admin token by hand.
+        var restored = await TargetCleaner.RestorePreservedAsync(target, wipe, CancellationToken.None);
+        Assert.Equal(1, restored);
+        await using (var db = _fx.NewContext())
+            Assert.True(await db.Set<Cmms.Domain.Identity.User>().AnyAsync(u => u.Username == "admin"));
+    }
+
     // The clear still exists and still works; it is simply no longer the price of loading. Kept as its own
     // test so removing the load path's dependence on it did not quietly remove its coverage.
     [SkippableFact]

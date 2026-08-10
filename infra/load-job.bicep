@@ -55,6 +55,9 @@ param loadExecute bool = false
 @description('Slug of the tenant whose write set may be emptied before loading. DESTRUCTIVE. Empty means never clear. It carries the SLUG rather than a boolean so the runner can refuse unless it matches tenantSlug: a deploy that changes the target but forgets this cannot empty the new tenant. Needs loadExecute too.')
 param clearTargetSlug string = ''
 
+@description('Empty the tenant and load nothing (lnicoara/cmms#3055). Still requires clearTargetSlug naming the tenant and loadExecute=true; this decides what happens after the clear, not whether one is permitted.')
+param clearOnly bool = false
+
 @description('SQL command timeout, in seconds, for every statement the runner issues. The clear deletes in batches and the bulk copy commits per chunk, so this bounds ONE batch rather than a whole table; raising it is an escape hatch, not the way a large table is emptied. lnicoara/cmms#2979.')
 @minValue(60)
 @maxValue(3600)
@@ -154,6 +157,7 @@ resource loadJob 'Microsoft.App/jobs@2025-01-01' = {
             { name: 'LOAD_TENANT_SLUG', value: tenantSlug }
             { name: 'LOAD_EXECUTE', value: string(loadExecute) }
             { name: 'LOAD_CLEAR_TARGET_SLUG', value: clearTargetSlug }
+            { name: 'LOAD_CLEAR_ONLY', value: string(clearOnly) }
             // Binds onto LoaderOptions.TimeoutSeconds through config.GetSection("Load"). Set here because
             // the deployed job otherwise had no way to reach it: the value was compiled in, so the only
             // way to change a timeout was to rebuild the image.

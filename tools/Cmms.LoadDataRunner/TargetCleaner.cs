@@ -71,17 +71,33 @@ public static class TargetCleaner
     /// that stopped on AuditEvents reported only that something timed out, and the 134 tables it had
     /// already emptied in the preceding second made it look like the clear had barely started.
     /// </param>
-    public static async Task<CleanReport> ClearAsync(
+    /// <summary>
+    /// Clears the tables an ARTIFACT owns, plus their foreign-key closure. The load path's entry point.
+    /// </summary>
+    public static Task<CleanReport> ClearAsync(
         LoadPlan plan, ModelBridge model, TargetDatabase target, bool execute, CancellationToken ct,
         Action<string>? onTable = null)
+        => ClearAsync(plan.Tables.Select(t => t.Table).ToList(), model, target, execute, ct, onTable);
+
+    /// <summary>
+    /// Clears a named set of tables, plus their foreign-key closure. lnicoara/cmms#3055.
+    ///
+    /// Separate from the artifact-shaped overload because emptying a tenant is not a question about a
+    /// dataset. Passing every table in the model asks for the tenant to be emptied; passing an artifact's
+    /// tables asks for room to be made for that artifact. Both are legitimate and they are not the same
+    /// request, so a caller has to say which one it means.
+    /// </summary>
+    public static async Task<CleanReport> ClearAsync(
+        IReadOnlyList<string> tables, ModelBridge model, TargetDatabase target, bool execute,
+        CancellationToken ct, Action<string>? onTable = null)
     {
         var lines = new List<string>();
         var cleared = new List<(string, long)>();
 
-        // Not plan.Tables. Clearing has to cover everything that REFERENCES the artifact's tables, or the
-        // DELETE fails on a foreign key from a table the plan has never heard of. See LoadPlan.ClearOrder.
-        var order = LoadPlan.ClearOrder(plan.Tables.Select(t => t.Table).ToList(), model);
-        var extra = order.Count - plan.Tables.Count;
+        // Not just the tables named. Clearing has to cover everything that REFERENCES them, or the DELETE
+        // fails on a foreign key from a table the caller never mentioned. See LoadPlan.ClearOrder.
+        var order = LoadPlan.ClearOrder(tables, model);
+        var extra = order.Count - tables.Count;
 
         // Written to the console AS IT GOES, not only collected for the caller to print afterwards. These
         // DELETEs commit independently, so a throw partway through leaves real rows gone; buffering the
@@ -96,7 +112,7 @@ public static class TargetCleaner
             if (extra > 0)
                 Say($"  {extra} of those are NOT in the artifact; they are emptied because they reference " +
                     "tables that are: " + string.Join(", ",
-                        order.Where(t => !plan.Tables.Any(p => string.Equals(p.Table, t, StringComparison.OrdinalIgnoreCase)))));
+                        order.Where(t => !tables.Any(p => string.Equals(p, t, StringComparison.OrdinalIgnoreCase)))));
             return new CleanReport(false, cleared, lines, Array.Empty<Dictionary<string, object?>>(),
                 Array.Empty<Dictionary<string, object?>>());
         }
