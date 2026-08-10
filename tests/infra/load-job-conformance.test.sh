@@ -310,6 +310,40 @@ grep -q 'mv "$TMP" "$CLONE"' "$CLONER" \
   || fail "$CLONER must clone to a temporary path and move it into place. A clone interrupted halfway would otherwise leave .cmms/<commit>/ present and incomplete, and every later run would have to be clever about it."
 ok "$CLONER cannot leave a half-finished clone behind"
 
+echo "== a failed lookup is not reported as a missing tag (lnicoara/cmms#3056) =="
+
+CLONE=scripts/pre-prod/clone-cmms-from-pre-prod.sh
+[ -f "$CLONE" ] || fail "$CLONE is missing; it is how both the generator and the loader learn which commit pre-prod runs."
+
+# The clone script asks Azure two questions, and the answers to "az failed" and "az returned nothing" go to
+# completely different places: one is Azure being briefly unavailable, the other is an untagged manifest.
+# Reporting the first as the second sent an operator to investigate a registry problem that did not exist,
+# while the tag was present the whole time. `2>/dev/null || true` on those calls is what made them
+# indistinguishable.
+if grep -nE 'az (containerapp|acr) [^|]*2>/dev/null \|\| true' "$CLONE" | grep -q .; then
+  grep -nE 'az (containerapp|acr) [^|]*2>/dev/null \|\| true' "$CLONE" >&2
+  fail "$CLONE discards az's stderr and exit code (lines above). A transient failure then arrives as an empty string and gets reported as a missing tag, which is a confident, wrong answer."
+fi
+grep -q 'az_read()' "$CLONE" \
+  || fail "$CLONE must route its az calls through a helper that keeps the exit code and the error text, so a failure can be told apart from an empty result."
+ok "$CLONE keeps az's exit code and error text"
+
+# The error must survive the SUBSHELL. az_read is always called inside a command substitution, so anything
+# it assigns to a variable is discarded on return: the first version captured the error faithfully into
+# AZ_LAST_ERROR and printed "az said: <nothing>", which is the same useless message it was meant to fix.
+if grep -qE 'AZ_LAST_ERROR=' "$CLONE"; then
+  fail "$CLONE captures az's error into a shell variable set inside a command substitution. That is a subshell; the assignment is discarded and the message reads 'az said: <nothing>'. Write it to a file whose path is fixed before the call."
+fi
+grep -q 'az_error()' "$CLONE" \
+  || fail "$CLONE must read az's error from a file, not from a variable set in a subshell."
+ok "$CLONE's error text survives the subshell it was produced in"
+
+# And there has to be a way through when Azure genuinely cannot be reached, or a transient outage blocks a
+# load entirely. Explicit and never a default: an unreachable pre-prod must not quietly become "use main".
+grep -q 'CMMS_COMMIT' "$CLONE" \
+  || fail "$CLONE must accept an explicit CMMS_COMMIT override for when Azure is unreachable. Without one, an outage blocks every load with no way past it."
+ok "$CLONE can be told the commit when pre-prod cannot be asked"
+
 echo "== no script may exit silently (lnicoara/cmms#3048) =="
 
 # The rule: a non-zero exit always says why. A silent death already cost a run that had SUCCEEDED
