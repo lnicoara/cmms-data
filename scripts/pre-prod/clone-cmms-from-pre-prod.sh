@@ -64,20 +64,64 @@ az account show >/dev/null 2>&1 || die "not signed in to Azure: run 'az login'. 
 az account set --subscription "$SUBSCRIPTION" >/dev/null 2>&1 \
   || die "cannot select subscription '$SUBSCRIPTION'."
 
-MIGRATE_IMAGE=$(az containerapp job show -n caj-cmms-migrate -g "$RG" \
-  --query "properties.template.containers[0].image" -o tsv 2>/dev/null || true)
+# An explicit override, for when Azure cannot be reached at all and you know the commit. Deliberately not
+# a default and never a fallback: an unreachable pre-prod must not quietly become "use main", which is how
+# a dataset built from the wrong model ends up pointed at pre-prod.
+if [ -n "${CMMS_COMMIT:-}" ]; then
+  $PRINT_ONLY || warn "CMMS_COMMIT=$CMMS_COMMIT was supplied; pre-prod is NOT being consulted"
+  COMMIT="$CMMS_COMMIT"
+else
+
+# az, with its stderr KEPT. lnicoara/cmms#3056.
+#
+# These were `2>/dev/null || true`, which threw away the real error and the exit code, so a transient
+# failure arrived here as an empty string and was then reported as "the image resolves to no tag". The tag
+# existed the whole time. An operator sent to investigate a registry problem that does not exist is worse
+# off than one told nothing, because the message sounds authoritative.
+#
+# Retried, because `az acr manifest list-metadata` is a preview command and this is a read: a throttle or a
+# token refresh is an ordinary event and not a reason to stop a load.
+# The error goes to a FILE at a path fixed before the call, not to a variable. az_read is always invoked
+# inside a command substitution, which is a subshell, so anything it assigns is discarded the moment it
+# returns: the first version set AZ_LAST_ERROR faithfully and the die printed "az said: <nothing>", which
+# is the same uninformative failure this whole change exists to remove.
+AZ_ERR=$(mktemp)
+trap 'rm -f "$AZ_ERR"' EXIT
+az_read() {
+  local out rc attempt=1
+  while :; do
+    out=$(az "$@" -o tsv 2>"$AZ_ERR"); rc=$?
+    # Preview-command noise on stderr is not failure; only the exit code is.
+    if [ $rc -eq 0 ]; then printf '%s' "$out"; return 0; fi
+    [ $attempt -ge 3 ] && return 1
+    attempt=$((attempt + 1)); sleep 3
+  done
+}
+az_error() { tail -3 "$AZ_ERR" 2>/dev/null | sed 's/^/    /' || true; }
+MIGRATE_IMAGE=$(az_read containerapp job show -n caj-cmms-migrate -g "$RG" \
+  --query "properties.template.containers[0].image") \
+  || die "could not read the caj-cmms-migrate image in $RG after 3 attempts, so which commit pre-prod's schema is at is unknown. az said:
+$(az_error)
+  This never falls back to main or to whatever is checked out. If Azure is simply unreachable and you know the commit, pass CMMS_COMMIT=<sha>."
 [ -n "$MIGRATE_IMAGE" ] \
-  || die "cannot read the caj-cmms-migrate image in $RG, so there is no way to know which commit pre-prod's schema is at. This never falls back to main or to whatever is checked out; that is how a dataset built from the wrong model ends up pointed at pre-prod."
+  || die "caj-cmms-migrate exists in $RG but reports no image, which should not happen. Check the job in the portal."
 
 REGISTRY="${MIGRATE_IMAGE%%.*}"
 case "$MIGRATE_IMAGE" in
   *@*) DIGEST="${MIGRATE_IMAGE##*@}"
-       COMMIT=$(az acr manifest list-metadata --registry "$REGISTRY" --name cmms-migrate \
-         --query "[?digest=='$DIGEST'].tags | [0] | [0]" -o tsv 2>/dev/null || true) ;;
+       # The failure and the empty answer are now DIFFERENT outcomes with different messages, because they
+       # send the reader to different places: one is Azure being briefly unavailable, the other is an
+       # untagged manifest, and reporting the first as the second wasted a real debugging session.
+       COMMIT=$(az_read acr manifest list-metadata --registry "$REGISTRY" --name cmms-migrate \
+         --query "[?digest=='$DIGEST'].tags | [0] | [0]") \
+         || die "could not ask $REGISTRY which commit built the image pre-prod is running, after 3 attempts. az said:
+$(az_error)
+  The image itself is fine; this is the lookup failing. Retry, or pass CMMS_COMMIT=<sha> if you know it."
+       [ -n "$COMMIT" ] \
+         || die "the manifest $DIGEST really does carry no tag in $REGISTRY, so nothing records which commit built it. An image is left untagged when a later build takes its tag; the commit cannot be recovered from the registry. Redeploy caj-cmms-migrate from a tagged build, or pass CMMS_COMMIT=<sha>." ;;
   *)   COMMIT="${MIGRATE_IMAGE##*:}" ;;
 esac
-[ -n "$COMMIT" ] \
-  || die "the caj-cmms-migrate image ($MIGRATE_IMAGE) resolves to no tag, so its commit is unknown. Refusing to guess."
+fi
 
 # A '-dirty-<hash>' suffix means that image was built from a tree with uncommitted files, so the tag names
 # a real commit plus a delta nothing recorded. The commit is the strongest thing still available and it is
