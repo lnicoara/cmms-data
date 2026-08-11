@@ -29,12 +29,18 @@
 # WHERE THE DATASET IS IS A REQUIRED INPUT: --artifact-dir=<absolute path>. Nothing is searched for and
 # there is no default location. The script prints the path and the manifest's seed before using it.
 #
-#   DIR=$HOME/git/cmms-data/data/small        # generate it with scripts/pre-prod/generate-pre-prod-small.sh
-#   scripts/pre-prod/load-pre-prod.sh --artifact-dir=$DIR             # loads demo-health
-#   scripts/pre-prod/load-pre-prod.sh --artifact-dir=$DIR --plan      # stage, verify, write nothing
-#   TENANT_SLUG=loadtest scripts/pre-prod/load-pre-prod.sh --artifact-dir=$DIR    # a different tenant
-#   SKIP_UPLOAD=1 scripts/pre-prod/load-pre-prod.sh --artifact-dir=$DIR           # already staged in blob
-#   scripts/pre-prod/load-pre-prod.sh --artifact-dir=$DIR --start-only --no-watch # start it and walk away
+#   scripts/pre-prod/load-pre-prod.sh                 # starts the full load and returns the prompt
+#   scripts/pre-prod/load-pre-prod.sh --prepare       # also uploads the artifact and builds the image
+#   scripts/pre-prod/load-pre-prod.sh --watch         # stay with it and poll
+#   scripts/pre-prod/load-pre-prod.sh --plan          # write nothing
+#   scripts/pre-prod/load-pre-prod.sh --artifact-dir=/abs/path/to/data/small   # a different dataset
+#   TENANT_SLUG=loadtest scripts/pre-prod/load-pre-prod.sh                     # a different tenant
+#
+# THE BARE COMMAND IS THE WHOLE OPERATION. It loads $HOME/git/cmms-data/data/full into demo-health with a
+# 96-hour deadline, using the image and the staged artifact already in Azure, and returns the prompt as
+# soon as the job is started. Close the laptop after that: the job runs in Azure and nothing local is left
+# holding it. Every one of those was an argument the operator had to remember, and forgetting the deadline
+# one silently capped a load that needs about 63 hours at 12.
 #
 # STARTING A LOAD YOU CAN WALK AWAY FROM (lnicoara/cmms-data#14). The job runs in Azure and outlives this
 # script either way: --no-watch already returns the prompt as soon as it is started, and Ctrl-C during the
@@ -68,7 +74,15 @@ TENANT_SLUG="${TENANT_SLUG:-demo-health}"
 # so the path stays the single thing an operator has to type.
 PROFILE="${PROFILE:-}"
 IMAGE_TAG="${IMAGE_TAG:-$(git rev-parse --short HEAD 2>/dev/null || echo manual)}"
-TIMEOUT_HOURS="${TIMEOUT_HOURS:-12}"
+# 96, not 12. The full artifact is 42.7M rows and the measured rate on 2026-08-10 was ~100,000 rows per 11
+# minutes, so AuditEvents alone is about 63 hours. A 12-hour default meant every real load was killed by
+# the deadline and reported as a FAILED execution, and the operator had to remember to prepend an
+# environment variable to get the number the work actually needs. 96 is the ceiling load-job.bicep allows.
+TIMEOUT_HOURS="${TIMEOUT_HOURS:-96}"
+# The dataset this script is for. It was required-with-no-default on the rule that nothing is searched for,
+# which is still true: this is a stated default, not a search. Typing the same absolute path on every run
+# was not making anyone safer, and the manifest's seed and row count are printed before it is used.
+ARTIFACT_DIR="${ARTIFACT_DIR:-$HOME/git/cmms-data/data/full}"
 
 # Terminal output: colour, phase headers, and die(). Sourced BEFORE the argument loop, because the loop
 # calls die() and defining it afterwards meant a flag with a missing value died with 'die: command not
@@ -191,7 +205,7 @@ build_if_absent() {
 
 # The script stays with the run and polls it every 5 seconds rather than printing a command to go run.
 # --no-watch returns the prompt as soon as the job is started.
-WATCH=true
+WATCH=false
 
 # Deploy and start against what is already in Azure. lnicoara/cmms-data#14.
 #
@@ -211,7 +225,7 @@ WATCH=true
 # numbering and row totals before writing a row, so a truncated download still fails before the load
 # rather than during it. What is skipped locally is the early copy of that check, which reads all 584
 # chunk files off disk and is the slowest thing in the script once the uploads are gone.
-START_ONLY=false
+START_ONLY=true
 # LOADS by default. The script is named load-pre-prod, and typing its name is the statement of intent, so
 # requiring --execute on top of that was asking the same question twice. Pass --plan for the dry run.
 #
@@ -248,10 +262,17 @@ for arg in "$@"; do
     Load into an unseeded tenant instead: TENANT_SLUG=<slug> $0 --artifact-dir=... --execute" ;;
     --profile=*) PROFILE="${arg#*=}" ;;
     --profile) die "--profile needs the blob prefix you mean to stage under: --profile=small" ;;
+    # Both accepted and both no-ops now that they are the default, because they are what every note and
+    # shell history says. Refusing them would be pedantry aimed at a command that asks for what already
+    # happens.
     --no-watch) WATCH=false ;;
-    # Deploy and start using what is ALREADY in Azure, skipping the preparation that puts it there.
-    # lnicoara/cmms-data#14. Pair it with --no-watch for a run you can walk away from.
     --start-only) START_ONLY=true ;;
+    # Stay with the run and poll it. The default returns the prompt as soon as the job is started.
+    --watch) WATCH=true ;;
+    # Do the preparation as well: upload the artifact, converge the store, build the image if the registry
+    # lacks this commit's tag. Needed on a first run, after a code change, and any time the dataset itself
+    # changed. lnicoara/cmms-data#14.
+    --prepare) START_ONLY=false ;;
     --artifact-dir=*) ARTIFACT_DIR="${arg#*=}" ;;
     --artifact-dir) die "--artifact-dir needs the ABSOLUTE path of the dataset directory: --artifact-dir=/abs/path" ;;
     # The range is the header block above, which grew when the clear was removed from it. It was 2,30 and
@@ -270,8 +291,12 @@ done
 # checkout beside this repo. Two copies of 'small' with different manifests then existed on one machine,
 # and the run that hit that stopped to ask which was meant. A load that moves a quarter of a million rows
 # into pre-prod should not open by guessing at a path, so the path is an input the operator supplies.
-[ -n "${ARTIFACT_DIR:-}" ] || die "--artifact-dir=<absolute path> is required. Name the dataset directory you mean to load; nothing is searched for and there is no default. For example:
-    TENANT_SLUG=loadtest scripts/pre-prod/load-pre-prod.sh --artifact-dir=\$HOME/git/cmms-data/data/small --execute"
+# It now defaults to $HOME/git/cmms-data/data/full rather than being required. That is still not a search:
+# one stated path, printed with the manifest's seed and row count before anything reads it, so a wrong
+# dataset is visible in the output rather than resolved out of the filesystem. Pass --artifact-dir to name
+# another one.
+[ -n "${ARTIFACT_DIR:-}" ] || die "ARTIFACT_DIR resolved to nothing, so \$HOME is unset. Pass the dataset explicitly:
+    scripts/pre-prod/load-pre-prod.sh --artifact-dir=/abs/path/to/data/full"
 
 # Absolute only. A relative path resolves against whatever directory the caller happened to be standing in,
 # so the same command would name different datasets from different shells, and this script's whole subject

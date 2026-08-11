@@ -762,9 +762,21 @@ echo "== the operator says which dataset, and the script builds only what is mis
 
 # Discovery is gone on purpose. Looking in /tmp/gen-<profile> and in a cmms-data checkout meant two copies
 # of one profile could both exist with different manifests, and the script's best move at that point was to
-# stop and ask. A path the operator supplies has no ambiguity to resolve.
-grep -q 'artifact-dir=<absolute path> is required' "$SCRIPT" \
-  || fail "$SCRIPT must require --artifact-dir. A load of this size should not open by guessing which directory was meant."
+# stop and ask.
+#
+# The assertion used to read "--artifact-dir is required", which pinned the ABSENCE OF A DEFAULT rather
+# than the absence of discovery, and those are not the same property. The dataset has one stated default
+# since lnicoara/cmms-data#14, because typing the same absolute path on every run made nobody safer while
+# making the fire-and-forget command something an operator had to assemble from four remembered arguments.
+# One literal path is not a search: there is exactly one candidate, it is printed with the manifest's seed
+# before anything reads it, and --artifact-dir still names another. What must never come back is the
+# script CHOOSING between candidates.
+if grep -vE '^[[:space:]]*#' "$SCRIPT" | grep -qE '/tmp/gen-|ARTIFACT_DIR=.*\$\(.*(find|ls|glob)'; then
+  fail "$SCRIPT searches for the dataset. Two copies of one profile with different manifests can both exist, and a load of this size must not choose between them."
+fi
+DEFAULTS=$(grep -cE '^ARTIFACT_DIR="\$\{ARTIFACT_DIR:-' "$SCRIPT" || true)
+[ "$DEFAULTS" = "1" ] \
+  || fail "$SCRIPT has $DEFAULTS default artifact directories; expected exactly 1. More than one is discovery wearing a different hat."
 ok "$SCRIPT requires the dataset location"
 
 if grep -vE '^[[:space:]]*#' "$SCRIPT" | grep -qE '/tmp/gen-|CMMS_DATA_DIR|\$CMMS_DATA'; then
