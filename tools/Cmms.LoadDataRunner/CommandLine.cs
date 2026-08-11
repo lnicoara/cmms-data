@@ -35,6 +35,16 @@ public static class CommandLine
                 continue;
             }
 
+            // Count every table and stop. Read-only, so unlike --clear-only it takes no confirming slug:
+            // there is nothing to confirm. Matched explicitly here for the reason in the class comment,
+            // not left to the reflection path, because the property is CountOnly and the flag is
+            // count-only and those do not agree.
+            if (string.Equals(body, "count-only", StringComparison.OrdinalIgnoreCase))
+            {
+                options.CountOnly = true;
+                continue;
+            }
+
             // Empty the tenant and stop. lnicoara/cmms#3055. Still requires --clear-target=<slug> and
             // --execute; this changes what happens AFTER the clear, not whether one is allowed.
             if (string.Equals(body, "clear-only", StringComparison.OrdinalIgnoreCase))

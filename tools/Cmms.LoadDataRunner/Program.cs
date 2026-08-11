@@ -102,7 +102,7 @@ if (parseError is not null)
 // --clear-only needs no artifact, and requiring one would be the whole problem it exists to fix: emptying
 // a tenant would mean staging gigabytes of a dataset nobody wants in order to reach the delete that runs
 // before it. lnicoara/cmms#3055.
-if (string.IsNullOrWhiteSpace(options.Artifact) && !options.ClearOnly)
+if (string.IsNullOrWhiteSpace(options.Artifact) && !options.ClearOnly && !options.CountOnly)
 {
     Console.Error.WriteLine("--artifact=<dir> is required (the directory holding manifest.json).");
     return 1;
@@ -209,6 +209,29 @@ if (!string.Equals(tenantCsb.DataSource, expectedServer, StringComparison.Ordina
         $"Connection for '{slug}' targets server '{tenantCsb.DataSource}', expected this environment's " +
         $"'{expectedServer}'. Refusing to load.");
     return 1;
+}
+
+// --- Count every table and stop. Read-only, so it runs BEFORE the migration guard. ---
+//
+// Deliberately above that guard rather than below it. A pending migration is a reason to refuse to WRITE,
+// because rows would be shaped for a schema the target does not have. It is not a reason to refuse to
+// look: a tenant whose schema has drifted is precisely the one an operator needs a row count from, and
+// putting the count downstream of the guard would make the tool unavailable in the case that motivates it.
+//
+// It also runs before the artifact is opened, so a count needs no dataset staged and no blob downloaded.
+if (options.CountOnly)
+{
+    try
+    {
+        var census = await TableCensus.ReadAsync(conn, options.TimeoutSeconds, CancellationToken.None);
+        TableCensus.Write(tenantCsb.InitialCatalog, census);
+        return 0;
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"Counting tables in '{tenantCsb.InitialCatalog}' failed: {ex.Message}");
+        return 1;
+    }
 }
 
 // --- Guard: migrations are current. Loading against a stale schema writes rows the model cannot read. ---
