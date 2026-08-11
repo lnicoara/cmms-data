@@ -1,4 +1,5 @@
 using Microsoft.Data.SqlClient;
+using System.Diagnostics;
 using System.IO.Compression;
 using System.Text.Json;
 
@@ -26,6 +27,18 @@ public sealed class LoadReport
     // reached was visible until a return that never came.
     public void Say(string line) { Lines.Add(line); Console.WriteLine(line); }
     public void Fail(string line) { Ok = false; Lines.Add(line); Console.WriteLine(line); }
+
+    // The LIVE line, and the only output that is deliberately NOT part of the report: written to stdout and
+    // never added to Lines, so it cannot reach the end-of-run summary.
+    //
+    // Reporting per TABLE was reporting per hour. AuditEvents is 344 of the full artifact's 584 chunks and
+    // 34.4M of its 42.7M rows, and it loads last, so a healthy run printed its 157th table line eight
+    // minutes in and then nothing at all while it did 80% of the work. That is indistinguishable from a
+    // hang, and it cost a good load: one was killed at 2h24m on the strength of the silence alone.
+    //
+    // The 'progress ' prefix is the handle load-pre-prod.sh uses to pick this line out of the streamed
+    // container log, and it is what keeps these lines out of the summary's allowlist grep.
+    public void Progress(string line) => Console.WriteLine($"progress {line}");
 }
 
 /// <summary>
@@ -255,18 +268,43 @@ public sealed class Loader
         return true;
     }
 
+    // Rate is over the rows this run actually WROTE, never the rows it walked past. A resume that skips half
+    // the artifact in seconds would otherwise open by reporting a throughput no database ever delivered, and
+    // an operator reads that number to decide whether to wait or to kill the run.
+    private string ProgressLine(string table, int position, long rowsSeen, long rowsLoaded, TimeSpan elapsed)
+    {
+        var rate = elapsed.TotalSeconds > 0 ? rowsLoaded / elapsed.TotalSeconds : 0;
+        return $"{table,-18} chunk {position:N0}/{_plan.TotalChunks:N0}  " +
+               $"{rowsSeen:N0}/{_plan.TotalRows:N0} rows  " +
+               (rate >= 1000 ? $"{rate / 1000:0.0}k rows/s" : $"{rate:0} rows/s");
+    }
+
     private async Task LoadAsync(
         Dictionary<string, HashSet<int>> landed, LoadReport report, CancellationToken ct)
     {
         report.Say("");
+        // Counted over the WHOLE plan, not the current table. A per-table position is silent about the only
+        // question a long run raises, which is how far through the run it is, and the table that makes a run
+        // long is exactly the one whose own counter says nothing until it finishes.
+        var clock = Stopwatch.StartNew();
+        var position = 0;
+        var rowsSeen = 0L;
         foreach (var t in _plan.Tables)
         {
             foreach (var chunk in t.Chunks)
             {
                 ct.ThrowIfCancellationRequested();
+                position++;
+                rowsSeen += chunk.Rows;
 
                 // Preflight already resolved every chunk to present or absent, so this loop does no
                 // probing: it loads what is missing and skips what is not.
+                //
+                // No progress line for a skipped chunk, on purpose. A resume can skip hundreds of chunks in
+                // the time it takes to read the set, and emitting one line each would put a burst of
+                // thousands into the container log to say only that the run had not started working yet.
+                // The position counter still advances, so the first real line after a resume opens at the
+                // chunk the run is actually on.
                 if (landed[t.Table].Contains(chunk.Number)) { report.ChunksSkipped++; continue; }
 
                 // A DUPLICATE KEY IS NOT A REASON TO END THE LOAD (lnicoara/cmms#3054).
@@ -296,12 +334,14 @@ public sealed class Loader
                     report.Say(
                         $"  duplicate: {t.Table} chunk {chunk.Number} ({chunk.Rows:N0} rows) is already " +
                         $"present under the same keys; skipping it and continuing. {FirstLine(ex.Message)}");
+                    report.Progress(ProgressLine(t.Table, position, rowsSeen, report.RowsLoaded, clock.Elapsed));
                     continue;
                 }
                 await _checkpoints.MarkCompleteAsync(t.Table, chunk.Number, Detail(chunk, "loaded"), ct);
 
                 report.ChunksLoaded++;
                 report.RowsLoaded += chunk.Rows;
+                report.Progress(ProgressLine(t.Table, position, rowsSeen, report.RowsLoaded, clock.Elapsed));
             }
             report.Say($"  {t.Table,-18} done  {t.Rows,12:N0} rows");
         }
