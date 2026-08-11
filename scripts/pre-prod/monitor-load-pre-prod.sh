@@ -68,12 +68,17 @@ human() {
 # ISO8601 to epoch. macOS ships BSD date, which does not take -d, so the GNU form is tried second rather
 # than first and both failures fall back to an empty string the caller checks. A monitor that died on a
 # date format would be reporting nothing at the moment it is most wanted.
+#
+# -u ON BOTH, and it is the difference between a number and a wrong number. ARM returns UTC; BSD date
+# without -u parses the string as LOCAL time, so on a machine in CDT every timestamp came back five hours
+# out and a job started ninety seconds ago reported a NEGATIVE elapsed time. Nothing failed, nothing warned,
+# and the deadline arithmetic underneath was wrong by the same five hours.
 epoch_of() {
   local ts=${1:-}
   [ -n "$ts" ] || { echo ""; return 0; }
   ts=${ts%%.*}; ts=${ts//Z/}; ts=${ts%%+*}
-  date -j -f "%Y-%m-%dT%H:%M:%S" "$ts" +%s 2>/dev/null \
-    || date -d "$ts" +%s 2>/dev/null \
+  date -j -u -f "%Y-%m-%dT%H:%M:%S" "$ts" +%s 2>/dev/null \
+    || date -u -d "${ts}Z" +%s 2>/dev/null \
     || echo ""
 }
 
@@ -124,23 +129,63 @@ report_once() {
   # The runner prefixes its progress lines with 'progress ', which is the handle this picks them out by.
   # Ingestion lags by minutes, so the newest line here is behind the elapsed time above rather than
   # matching it.
+  # Same JSON handling as --log, and for the same reason: -o tsv injects the result-table name as a column,
+  # so the "latest progress line" arrived with a PrimaryResult glued to it. The timestamp is printed too,
+  # because Log Analytics lags ingestion by minutes and a progress figure with no time on it reads as
+  # current when it is not.
   local latest
   latest=$(az monitor log-analytics query -w "$WS" --analytics-query \
-    "ContainerAppConsoleLogs_CL | where ContainerJobName_s == '$JOB' | where TimeGenerated > ago(2h) | where Log_s startswith 'progress ' | order by TimeGenerated desc | take 1 | project Log_s" \
-    -o tsv 2>/dev/null | head -1 || true)
+    "ContainerAppConsoleLogs_CL | where ContainerJobName_s == '$JOB' | where TimeGenerated > ago(2h) | where Log_s startswith 'progress ' or Log_s contains ' done ' | order by TimeGenerated desc | take 1 | project TimeGenerated, Log_s" \
+    -o json 2>/dev/null \
+    | python3 -c '
+import json, sys
+try:
+    rows = json.load(sys.stdin)
+except Exception:
+    rows = []
+if rows:
+    r = rows[0]
+    ts = (r.get("TimeGenerated") or "")[11:19]
+    line = (r.get("Log_s") or "").strip()
+    if line.startswith("progress "):
+        line = line[len("progress "):]
+    print(f"{ts}Z  {line}")
+' || true)
   if [ -n "$latest" ]; then
-    note "${latest#progress }"
+    fact "latest" "$latest"
   else
-    note "no progress line in the last 2h (the runner prints one per chunk; staging and preflight print none)"
+    note "no progress line in the last 2h (staging and preflight print none; log ingestion also lags by minutes)"
   fi
 }
 
 if [ "$SHOW_LOG" = "true" ]; then
   [ -n "$WS" ] || die "no Log Analytics workspace on cae-cmms-preprod, so there is no output to read."
-  step "Recent runner output"
+  step "Recent runner output (times are UTC)"
+  # JSON, not -o tsv, and every line carries its timestamp.
+  #
+  # The first version projected Log_s alone and printed it with -o tsv, which produced output with no time
+  # on it and a stray 'PrimaryResult' column: the CLI injects the result-table name as a field, and its
+  # position in the row is not something to parse around. Undated log lines are close to useless here,
+  # because the question being asked is nearly always about RATE, and a run measured in days is read by
+  # comparing two timestamps.
+  #
+  # Ordered ascending so it reads top to bottom like a transcript, and tailed to the last 60 because a load
+  # emits one line per chunk and 584 of them do not belong on a terminal.
   az monitor log-analytics query -w "$WS" --analytics-query \
-    "ContainerAppConsoleLogs_CL | where ContainerJobName_s == '$JOB' | where TimeGenerated > ago(2h) | order by TimeGenerated asc | project Log_s" \
-    -o tsv 2>/dev/null | tail -40
+    "ContainerAppConsoleLogs_CL | where ContainerJobName_s == '$JOB' | where TimeGenerated > ago(${LOG_WINDOW:-2h}) | order by TimeGenerated asc | project TimeGenerated, Log_s" \
+    -o json 2>/dev/null \
+  | python3 -c '
+import json, sys
+try:
+    rows = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for r in rows[-60:]:
+    ts = (r.get("TimeGenerated") or "")[11:19]
+    line = (r.get("Log_s") or "").rstrip()
+    if line:
+        print(f"  {ts}  {line}")
+'
   exit 0
 fi
 
