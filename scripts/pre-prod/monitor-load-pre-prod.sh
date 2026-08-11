@@ -57,6 +57,22 @@ TIMEOUT_S=$(az containerapp job show -n "$JOB" -g "$RG" \
 
 # Seconds to something a person can read at a glance. A load is reported in days and hours, never in the
 # 347,821 seconds that are technically the same answer.
+# An epoch rendered in the OPERATOR'S timezone, with the zone named.
+#
+# Azure speaks UTC everywhere: ARM returns 2026-08-11T22:33:26+00:00 and Log Analytics stamps rows the same
+# way. An operator reading a load at 5:42pm Central has to subtract five hours in their head to answer "is
+# this stalled", and gets it wrong in the direction that looks like a stall. The conversion is the system's
+# own tz database rather than a hardcoded offset, so it is right across a DST boundary, which a load
+# measured in days can cross.
+local_of() {
+  local e=${1:-}
+  [ -n "$e" ] || { echo ""; return 0; }
+  # 12-hour with AM/PM, and the leading zero stripped so it reads like a clock rather than a log format.
+  date -r "$e" "+%Y-%m-%d %l:%M:%S %p %Z" 2>/dev/null | tr -s ' ' \
+    || date -d "@$e" "+%Y-%m-%d %l:%M:%S %p %Z" 2>/dev/null | tr -s ' ' \
+    || echo ""
+}
+
 human() {
   local s=${1:-0} d h m
   d=$(( s / 86400 )); h=$(( (s % 86400) / 3600 )); m=$(( (s % 3600) / 60 ))
@@ -96,11 +112,18 @@ report_once() {
 
   step "$name"
   fact "status" "$status"
-  fact "started" "${start:-unknown}"
 
   local started now elapsed
   started=$(epoch_of "${start:-}")
   now=$(date +%s)
+  # Local first, because it is the one being compared against the clock on the wall. UTC is kept beside it
+  # rather than dropped: every other tool in this chain reports UTC, and a report that silently switched
+  # would make two correct readings look like a disagreement.
+  if [ -n "$started" ]; then
+    fact "started" "$(local_of "$started")  (${start})"
+  else
+    fact "started" "${start:-unknown}"
+  fi
   if [ -n "$started" ]; then
     elapsed=$(( now - started ))
     fact "elapsed" "$(human "$elapsed")"
@@ -138,21 +161,55 @@ report_once() {
     "ContainerAppConsoleLogs_CL | where ContainerJobName_s == '$JOB' | where TimeGenerated > ago(2h) | where Log_s startswith 'progress ' or Log_s contains ' done ' | order by TimeGenerated desc | take 1 | project TimeGenerated, Log_s" \
     -o json 2>/dev/null \
     | python3 -c '
-import json, sys
+import json, re, sys
+from datetime import datetime, timezone
+
+def parse(ts):
+    if not ts:
+        return None
+    ts = re.sub(r"(\.\d{6})\d+", r"\1", ts.strip()).replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(ts)
+    except Exception:
+        return None
+
+# HOW OLD, not just when. Log Analytics lags ingestion by minutes, so a progress figure printed on its own
+# reads as current when it is not, and "is this load stalled" is answered by the gap rather than by the
+# number. Said in whole minutes because the ingestion lag makes anything finer a false precision.
+def ago(dt):
+    secs = int((datetime.now(timezone.utc) - dt).total_seconds())
+    if secs < 60:
+        return "just now"
+    mins = secs // 60
+    if mins < 60:
+        # Plural computed OUTSIDE the f-string. A quoted conditional inside the expression needs escaped
+        # quotes here (this is single-quoted shell), and a backslash in an f-string expression is a syntax
+        # error before Python 3.12, which fails the whole monitor rather than one line of it.
+        plural = "" if mins == 1 else "s"
+        return f"{mins} minute{plural} ago"
+    hrs, mins = divmod(mins, 60)
+    return f"{hrs}h {mins}m ago"
+
 try:
     rows = json.load(sys.stdin)
 except Exception:
     rows = []
 if rows:
     r = rows[0]
-    ts = (r.get("TimeGenerated") or "")[11:19]
     line = (r.get("Log_s") or "").strip()
     if line.startswith("progress "):
         line = line[len("progress "):]
-    print(f"{ts}Z  {line}")
+    dt = parse(r.get("TimeGenerated"))
+    when = dt.astimezone().strftime("%l:%M:%S %p %Z").strip() if dt else ""
+    print(when + "  " + line)
+    if dt:
+        print(ago(dt))
 ' || true)
   if [ -n "$latest" ]; then
-    fact "latest" "$latest"
+    fact "latest" "$(printf '%s' "$latest" | head -1)"
+    local age; age=$(printf '%s' "$latest" | sed -n '2p')
+    # Indented under the value rather than given its own label, because it qualifies the line above it.
+    [ -n "$age" ] && printf '  %s%-20s %s%s\n' "$C_DIM" "" "$age" "$C_RESET"
   else
     note "no progress line in the last 2h (staging and preflight print none; log ingestion also lags by minutes)"
   fi
@@ -175,16 +232,32 @@ if [ "$SHOW_LOG" = "true" ]; then
     "ContainerAppConsoleLogs_CL | where ContainerJobName_s == '$JOB' | where TimeGenerated > ago(${LOG_WINDOW:-2h}) | order by TimeGenerated asc | project TimeGenerated, Log_s" \
     -o json 2>/dev/null \
   | python3 -c '
-import json, sys
+import json, re, sys
+from datetime import datetime
+
+# Log Analytics stamps rows in UTC with SEVEN fractional digits, which fromisoformat rejects on Python
+# versions before 3.11, so the fraction is trimmed to six before parsing. astimezone() with no argument
+# converts to the machine tz rather than a hardcoded offset, so this stays right across a DST change.
+def local(ts):
+    if not ts:
+        return ""
+    ts = re.sub(r"(\.\d{6})\d+", r"\1", ts.strip()).replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(ts).astimezone().strftime("%l:%M:%S %p").strip()
+    except Exception:
+        return ts[11:19]
+
 try:
     rows = json.load(sys.stdin)
 except Exception:
     sys.exit(0)
 for r in rows[-60:]:
-    ts = (r.get("TimeGenerated") or "")[11:19]
     line = (r.get("Log_s") or "").rstrip()
     if line:
-        print(f"  {ts}  {line}")
+        # Resolved before the f-string: a backslash in an f-string expression is a syntax error before
+        # Python 3.12, and the escaped quotes are unavoidable inside single-quoted shell.
+        when = local(r.get("TimeGenerated"))
+        print(f"  {when:>11}  {line}")
 '
   exit 0
 fi
