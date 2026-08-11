@@ -26,8 +26,24 @@ truthy() {
 }
 
 ARTIFACT_DIR="${ARTIFACT_DIR:-/artifact}"
-: "${ARTIFACT_BLOB_URL:?ARTIFACT_BLOB_URL is required (the artifact container URL to stage from)}"
 : "${LOAD_TENANT_SLUG:?LOAD_TENANT_SLUG is required (the tenant to load)}"
+
+# COUNT ONLY: report every table's row count and stop. Read-only.
+#
+# FIRST, and above the ARTIFACT_BLOB_URL requirement rather than beside the clear-only branch below it.
+# "How many rows are in this tenant" is a question about the database, so a count job has no artifact to
+# name, and demanding one would make the answer cost a 3.8 GB download plus the several minutes it takes.
+# The clear-only branch sits lower because it still shares the load job's artifact-shaped configuration;
+# this path deliberately shares none of it.
+#
+# No fence and no --execute. It cannot change anything, and a confirmation on a read is how operators
+# learn to type confirmations without reading them.
+if truthy "${LOAD_COUNT_ONLY:-false}"; then
+  echo "==> Counting every table in tenant '${LOAD_TENANT_SLUG}'. Reading only."
+  exec dotnet Cmms.LoadDataRunner.dll --tenant="${LOAD_TENANT_SLUG}" --count-only
+fi
+
+: "${ARTIFACT_BLOB_URL:?ARTIFACT_BLOB_URL is required (the artifact container URL to stage from)}"
 
 echo "==> Staging artifact from ${ARTIFACT_BLOB_URL} into ${ARTIFACT_DIR}"
 

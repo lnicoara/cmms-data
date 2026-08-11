@@ -60,6 +60,29 @@ public class CommandLineTests
         Assert.True(Parse("--artifact=/tmp/a", "--tenant=t", "--verify-artifact").VerifyArtifactOnly);
     }
 
+    // The hazard this pins is the one --clear-target already shipped: the flag is hyphenated and the
+    // property is not, so the reflection fallback looks for a property named "count-only", finds none, and
+    // the run dies with "Unknown option: count-only" having touched nothing. Reading the parser does not
+    // catch that; running it does.
+    [Fact]
+    public void Count_only_is_recognised()
+    {
+        Assert.True(Parse("--tenant=t", "--count-only").CountOnly);
+    }
+
+    // A census is READ-ONLY, and the absence of a write is the property worth pinning: --count-only must
+    // not imply --execute, and it must not carry a clear slug. If either ever became true here, a tool an
+    // operator runs to look at a tenant would start changing it.
+    [Fact]
+    public void Count_only_neither_executes_nor_clears()
+    {
+        var o = Parse("--tenant=t", "--count-only");
+
+        Assert.True(o.CountOnly);
+        Assert.False(o.Execute);
+        Assert.Equal("", o.ClearTargetSlug);
+    }
+
     // The reflection path still has to work for the options whose flag and property genuinely agree.
     [Fact]
     public void Name_equals_value_options_still_bind_by_reflection()

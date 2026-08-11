@@ -696,10 +696,13 @@ grep -qE "grep -qE 'rows loaded\|PLAN ONLY\|FAILED while\|REFUSING'" "$SCRIPT" \
   || fail "$SCRIPT must poll Log Analytics until the runner's TERMINAL line has landed. Reading once and printing the tail reports a finished load as a handful of unordered fragments."
 ok "$SCRIPT waits for the runner's verdict before reporting it"
 
-echo "== the job is sized for a load measured in hours =="
+echo "== the job is sized for a load measured in days =="
 
-# The seed job allows 1800s. This one moves 42.7M rows into a General Purpose database whose log
-# throughput caps around 4.5 MB/s, so a 30-minute timeout would guarantee a killed replica every run.
+# The seed job allows 1800s. This one moves 42.7M rows, so a 30-minute timeout would guarantee a killed
+# replica every run. The original figure here reasoned from a General Purpose database's ~4.5 MB/s log
+# throughput; a full run on 2026-08-10 retired that estimate, because nothing on the database was
+# saturated (log write 4%) and the real rate was ~100k rows per ~11 minutes. See the timeoutHours block
+# in load-job.bicep for the measurement and for why the ceiling is now 96 hours.
 grep -q 'replicaTimeout: timeoutHours \* 3600' "$JOB" \
   || fail "$JOB must express replicaTimeout in hours; the seed job's 1800s is far too short for this load."
 ok "$JOB expresses its timeout in hours"

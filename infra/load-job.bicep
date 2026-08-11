@@ -9,8 +9,8 @@
 // It mirrors infra/seed-job.bicep and references the standing infrastructure by deterministic name, so it
 // has no output plumbing. Two things differ from the seed job and both are deliberate:
 //
-//   replicaTimeout   The seed job allows 1800s. This load moves 42.7M rows into a General Purpose
-//                    database whose log throughput caps around 4.5 MB/s, so it is measured in hours.
+//   replicaTimeout   The seed job allows 1800s. This load moves 42.7M rows and is measured in DAYS, so
+//                    see timeoutHours below for the number and for why the first estimate was wrong.
 //   replicaRetryLimit The seed job allows 0 retries because a half-seed is awkward to reason about. A
 //                    retried LOAD is safe by construction: every chunk is one transaction and preflight
 //                    reconciles against the checkpoint set, so a retry resumes rather than duplicates.
@@ -63,9 +63,27 @@ param clearOnly bool = false
 @maxValue(3600)
 param loadTimeoutSeconds int = 600
 
-@description('Hours the job may run before Container Apps kills the replica. The loader is resumable, so a timeout costs a restart rather than the load.')
+// The ceiling was 24, sized off an estimate that measured the wrong resource: "a General Purpose database
+// whose log throughput caps around 4.5 MB/s" puts 42.7M rows near an hour, which made 12 look like ten
+// times the headroom needed. A full run on 2026-08-10 says otherwise. Nothing on the database was
+// saturated (log write averaged 4%, CPU 3%, data read 32%) and the observed rate into the target was
+// ~100,000 rows per ~11 minutes, so AuditEvents ALONE (34,317,200 rows, 344 chunks) is about 63 hours,
+// with 153 tables queued behind it. A 12-hour run was never going to reach the second table.
+//
+// The failure this prevents is not a lost load, because the loader resumes: across two killed 12-hour
+// replicas the checkpoints still advanced 115 -> 176 chunks and nothing was lost. It is a MISREAD one.
+// Container Apps ends a replica that outlives replicaTimeout with DeadlineExceeded and reports the
+// execution as 'Failed', which is indistinguishable at a glance from the loader refusing or erroring,
+// and it sent an operator hunting for a fault in a run that was working exactly as designed.
+//
+// 96 is a ceiling, not the default: raising the DEFAULT would hand every unattended run a four-day
+// booking. Callers opt in (load-pre-prod.sh reads TIMEOUT_HOURS). ARM documents no maximum for
+// replicaTimeout, so 96 hours (345,600s) is untested against the platform; the first deploy at that
+// value is the test, and `az deployment group what-if` fails before anything is converged if it is
+// out of range.
+@description('Hours the job may run before Container Apps kills the replica. The loader is resumable, so a timeout costs the one in-flight chunk rather than the load, but the kill is reported as a FAILED execution.')
 @minValue(1)
-@maxValue(24)
+@maxValue(96)
 param timeoutHours int = 12
 
 resource uami 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' existing = {

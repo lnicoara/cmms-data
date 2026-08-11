@@ -32,7 +32,7 @@ public sealed class LoadPlan
 
     public static LoadPlan Build(Artifact artifact, ModelBridge model)
     {
-        var order = DependencyOrder(artifact.Tables, model);
+        var order = Defer(DependencyOrder(artifact.Tables, model), model);
 
         var plans = new List<TablePlan>(order.Count);
         foreach (var table in order)
@@ -49,6 +49,96 @@ public sealed class LoadPlan
             plans.Add(new TablePlan(table, chunks, loadable, keyColumns));
         }
         return new LoadPlan(plans);
+    }
+
+    /// <summary>
+    /// Tables that load AFTER everything the dependency sort has to order, whatever position that sort
+    /// would otherwise give them.
+    ///
+    /// Only a table with NO foreign key in either direction may be listed, and <see cref="Defer"/> proves
+    /// that against the model rather than trusting this list. An isolated node has no valid-order
+    /// constraint at all, so moving it is free; moving anything else silently writes rows whose references
+    /// dangle, which is the failure the derived order exists to prevent.
+    ///
+    /// AuditEvents is the case, and it is isolated on purpose: an audit row names its subject by the
+    /// STRINGS EntityType and EntityId rather than by a relationship, so it survives the row it describes
+    /// being deleted, which is the whole point of an append-only Part 11 trail. Nothing in the model
+    /// carries an AuditEventId either.
+    ///
+    /// Why it is worth deferring: it dominates the artifact, at 344 of 584 chunks and 34.4M of 42.7M rows,
+    /// and the tie-break inside a ready set is alphabetical, so it landed near the FRONT of the first
+    /// dependency round. At the rate measured on 2026-08-10 (roughly 100,000 rows per 11 minutes, with
+    /// nothing on the database saturated) that is about 63 hours of loading before the second table starts.
+    /// Every table an operator would actually query sat behind it. Last is where the least interesting 80%
+    /// of the rows belong.
+    ///
+    /// This changes NO checkpoint. They are keyed by artifact hash, database, table and chunk with no
+    /// notion of sequence, so a reordered loader resuming an artifact skips exactly what it skipped before.
+    /// </summary>
+    private static readonly IReadOnlyList<string> LoadLast = new[] { "AuditEvents" };
+
+    /// <summary>
+    /// Moves <see cref="LoadLast"/>'s tables to the end of the order, after checking that each one really
+    /// is an isolated node in the model's foreign-key graph.
+    ///
+    /// The check is the point, not ceremony. "AuditEvents has no foreign keys" is true today and is a
+    /// property of the MODEL, not of this file, so the day someone gives AuditEvent a relationship this
+    /// deferral starts loading a child before its parent. SqlBulkCopy does not check constraints, so that
+    /// would not error: it would write dangling references and look like a clean load. Refusing here turns
+    /// a silent corruption into a build-time sentence naming the edge that appeared.
+    /// </summary>
+    private static IReadOnlyList<string> Defer(IReadOnlyList<string> order, ModelBridge model)
+    {
+        var deferred = order.Where(t => LoadLast.Contains(t, StringComparer.OrdinalIgnoreCase)).ToList();
+        if (deferred.Count == 0) return order;
+
+        foreach (var table in deferred) AssertIsolated(table, model);
+
+        return order.Where(t => !deferred.Contains(t, StringComparer.OrdinalIgnoreCase))
+            .Concat(deferred)
+            .ToList();
+    }
+
+    /// <summary>
+    /// Throws unless a table has no foreign key pointing out of it and none in the whole model pointing at
+    /// it. Deliberately checked against every table the model knows rather than only the artifact's: the
+    /// claim being made is about the table, so an edge that this artifact happens not to carry still
+    /// retires the reason for deferring it.
+    /// </summary>
+    private static void AssertIsolated(string table, ModelBridge model)
+    {
+        var et = model.EntityTypeForTable(table)
+                 ?? throw new InvalidOperationException(
+                     $"'{table}' is listed to load last but the model has no entity mapped to it.");
+
+        var outbound = et.GetForeignKeys()
+            .Select(fk => fk.PrincipalEntityType.GetTableName())
+            .Where(p => p is not null && !string.Equals(p, table, StringComparison.OrdinalIgnoreCase))
+            .Select(p => p!)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(p => p, StringComparer.Ordinal)
+            .ToList();
+
+        var inbound = model.AllTableNames()
+            .Where(other => !string.Equals(other, table, StringComparison.OrdinalIgnoreCase))
+            .Where(other => model.EntityTypeForTable(other)?.GetForeignKeys()
+                .Any(fk => string.Equals(
+                    fk.PrincipalEntityType.GetTableName(), table, StringComparison.OrdinalIgnoreCase)) == true)
+            .OrderBy(t => t, StringComparer.Ordinal)
+            .ToList();
+
+        if (outbound.Count == 0 && inbound.Count == 0) return;
+
+        var edges = new List<string>();
+        if (outbound.Count > 0) edges.Add($"it now references {string.Join(", ", outbound)}");
+        if (inbound.Count > 0) edges.Add($"{string.Join(", ", inbound)} now reference it");
+
+        throw new InvalidOperationException(
+            $"'{table}' is listed to load last, which is only sound while it has no foreign key in either " +
+            $"direction, and {string.Join("; ", edges)}. Its position in the load is a real constraint now, " +
+            "so remove it from LoadLast and let the dependency sort place it. Deferring it anyway would " +
+            "bulk-copy rows whose references dangle, and SqlBulkCopy does not check constraints, so nothing " +
+            "downstream would report it.");
     }
 
     /// <summary>

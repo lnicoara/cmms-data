@@ -67,6 +67,25 @@ public sealed class LoaderOptions
     public bool ClearOnly { get; set; }
 
     /// <summary>
+    /// Count every table in the tenant database and STOP, loading nothing and deleting nothing.
+    ///
+    /// It needs no artifact, and requiring one would defeat the point: "what is in this tenant" is a
+    /// question about the DATABASE, not about a dataset, and answering it would otherwise mean staging
+    /// gigabytes of an artifact nobody wants in order to reach a SELECT. Same reasoning that gave
+    /// <see cref="ClearOnly"/> its own path (lnicoara/cmms#3055).
+    ///
+    /// READ-ONLY, and that is why it carries no fence. <see cref="ClearOnly"/> needs a matching slug and
+    /// <see cref="Execute"/> because it destroys rows; this one cannot change anything, so guarding it
+    /// would be ceremony that teaches an operator to type confirmations without reading them.
+    ///
+    /// The table set is every user table in the database rather than the EF model's or an artifact's. A
+    /// count exists to show what is THERE, so deriving the list from either would hide exactly the rows
+    /// that make the answer surprising: a table the model has since dropped, or one an earlier dataset
+    /// left behind.
+    /// </summary>
+    public bool CountOnly { get; set; }
+
+    /// <summary>
     /// Validate the ARTIFACT and exit, touching no database at all.
     ///
     /// This exists because artifact verification and target preflight are different questions that were

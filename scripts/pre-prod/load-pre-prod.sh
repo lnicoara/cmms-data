@@ -597,27 +597,67 @@ if [ "$WATCH" = "true" ]; then
   # wall of Failed rows. Ctrl-C stops the WATCHING, never the job: the load is resumable by design.
   START_EPOCH=$(date +%s)
   LAST_STATUS=""
+  LAST_TABLE=""
+
+  # STREAMED FROM THE RUNNING REPLICA, not from Log Analytics. The status field alone is the word "Running"
+  # for hours, which is how a healthy load came to be killed at 2h24m: the console had a clock and no way to
+  # tell work from a hang. The runner emits a 'progress ' line per chunk for exactly this, and it has to be
+  # read from the container, because LA runs a minute or two behind (see "Result" below) and a progress line
+  # that reports a stale chunk number is worse than none.
+  #
+  # Re-entered in a loop because the stream is not durable: it ends when the replica is not up yet, and it
+  # ends again whenever the connection drops mid-load. Every failure here is swallowed on purpose. This is
+  # the DISPLAY, and a load that is running fine must never be reported as broken because a log tail could
+  # not attach; when nothing arrives the line falls back to the status, which is what it showed before.
+  STREAM=$(mktemp)
+  STREAM_STOP="$STREAM.stop"
+  ( while [ ! -f "$STREAM_STOP" ]; do
+      az containerapp job logs show -n caj-cmms-load -g "$RG" --execution "$EXEC" \
+        --container load --follow --tail 1 >>"$STREAM" 2>/dev/null || true
+      sleep 2
+    done ) &
+  STREAM_PID=$!
+
   while :; do
     STATUS=$(az containerapp job execution show -n caj-cmms-load -g "$RG" \
       --job-execution-name "$EXEC" --query "properties.status" -o tsv 2>/dev/null || echo Unknown)
     NOW=$(date +%s); ELAPSED=$((NOW - START_EPOCH))
+    # The newest chunk the runner has reported. Read out of the JSON envelope by taking the run of
+    # characters up to the closing quote, which holds because the runner's progress line is table names and
+    # digits and carries nothing that JSON would escape.
+    PROGRESS=$(grep -ao 'progress [^"]*' "$STREAM" 2>/dev/null | tail -1 || true)
+    PROGRESS=${PROGRESS#progress }
     # ONE line, rewritten in place, rather than a new line per heartbeat. A load is measured in hours, and
     # the old per-minute heartbeat printed hundreds of lines whose only content was that nothing had
     # changed. Falls back to a line per state change when stdout is not a terminal, because a carriage
     # return in a log file produces one unreadable smear.
     if [ -t 1 ]; then
-      printf '\r  %s%02d:%02d:%02d%s  %s   ' "$C_DIM" \
-        $((ELAPSED/3600)) $(((ELAPSED%3600)/60)) $((ELAPSED%60)) "$C_RESET" "$STATUS"
-    elif [ "$STATUS" != "$LAST_STATUS" ]; then
-      printf '  %02d:%02d:%02d  %s\n' $((ELAPSED/3600)) $(((ELAPSED%3600)/60)) $((ELAPSED%60)) "$STATUS"
+      printf '\r  %s%02d:%02d:%02d%s  %s\033[K' "$C_DIM" \
+        $((ELAPSED/3600)) $(((ELAPSED%3600)/60)) $((ELAPSED%60)) "$C_RESET" "${PROGRESS:-$STATUS}"
+    elif [ "$STATUS" != "$LAST_STATUS" ] || [ "${PROGRESS%% *}" != "$LAST_TABLE" ]; then
+      # A redirected run gets a line per TABLE, not per chunk. Per chunk would be 584 lines in a file whose
+      # reader wants to know where the run got to, and per state change was the silence this set out to fix.
+      printf '  %02d:%02d:%02d  %s\n' $((ELAPSED/3600)) $(((ELAPSED%3600)/60)) $((ELAPSED%60)) \
+        "${PROGRESS:-$STATUS}"
     fi
     LAST_STATUS="$STATUS"
+    LAST_TABLE="${PROGRESS%% *}"
     case "$STATUS" in
       Succeeded|Failed|Stopped|Degraded) break ;;
     esac
     sleep 5
   done
-  [ -t 1 ] && printf '\r%*s\r' 60 ''
+
+  # Children first, then the subshell. Killing the subshell alone orphans the `az` process still streaming
+  # into a file that is about to be deleted.
+  : >"$STREAM_STOP"
+  pkill -P "$STREAM_PID" 2>/dev/null || true
+  kill "$STREAM_PID" 2>/dev/null || true
+  wait "$STREAM_PID" 2>/dev/null || true
+  rm -f "$STREAM" "$STREAM_STOP"
+  # Written as an if rather than `[ -t 1 ] && printf`, because a bare && statement that fails IS the script's
+  # exit status under `set -e`, so the non-terminal path used to end the run right here (#3048).
+  if [ -t 1 ]; then printf '\r\033[K'; fi
   ELAPSED=$(( $(date +%s) - START_EPOCH ))
   DURATION=$(printf '%02d:%02d:%02d' $((ELAPSED/3600)) $(((ELAPSED%3600)/60)) $((ELAPSED%60)))
 
