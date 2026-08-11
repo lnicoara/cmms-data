@@ -190,7 +190,12 @@ ok "$SCRIPT neither builds, deploys, nor starts the migration job"
 
 # Exactly one image, and it is the loader's. The migrate build coming back would show up here too, but this
 # says the positive thing: a load builds the thing that loads, and nothing else.
-IMAGE_BUILDS=$(grep -vE '^[[:space:]]*#' "$SCRIPT" | grep -cE '^build_if_absent ')
+# Leading whitespace allowed, because the call sits inside a conditional since lnicoara/cmms-data#14
+# (--start-only refuses instead of building). Anchoring it to column zero made an indentation change read
+# as "zero images are built", and `|| true` is why you can read that sentence at all: grep -c exits 1 when
+# it counts nothing, and under `set -euo pipefail` the assignment carried that status and killed this suite
+# with no output at all, three sections before the assertion that would have explained it (#3047, #3048).
+IMAGE_BUILDS=$(grep -vE '^[[:space:]]*#' "$SCRIPT" | grep -cE '^[[:space:]]*build_if_absent ' || true)
 [ "$IMAGE_BUILDS" = "1" ] \
   || fail "$SCRIPT builds $IMAGE_BUILDS images; expected exactly 1 (cmms-load). The load runs in-VNet, so it needs its own image and nothing else's."
 ok "$SCRIPT builds one image, the loader's"
@@ -793,6 +798,64 @@ ok "$SCRIPT builds an image only when the registry lacks it"
 grep -q 'DIGEST=$(image_digest cmms-load)' "$SCRIPT" \
   || fail "$SCRIPT must still resolve the load image's digest from the registry. Skipping the build must never mean deploying something nobody read back."
 ok "$SCRIPT still deploys by a digest read back from the registry"
+
+echo "== a load can be started and walked away from (lnicoara/cmms-data#14) =="
+
+# The build context is an ALLOWLIST. `az acr build` builds remotely, so anything not excluded is uploaded
+# before the build starts, and without this file that was the entire working tree: 4.2 GB to deliver the
+# ~3.5 MB the Dockerfile copies. A denylist is correct the day it is written and silently wrong after it,
+# because the next large directory somebody adds is uploaded again and a slow upload looks exactly like a
+# slow connection.
+[ -f .dockerignore ] || fail ".dockerignore is missing. Without it 'az acr build' uploads the whole working tree, including the multi-gigabyte data/ directory the image never copies."
+grep -qE '^\*[[:space:]]*$' .dockerignore \
+  || fail ".dockerignore must start from '*' and re-include what the Dockerfile COPYs. A list of exclusions regrows the moment a new directory is added, which is the failure it exists to prevent."
+ok ".dockerignore excludes everything by default"
+
+# Every path the Dockerfile COPYs has to be re-included, or the build fails on a missing file. Derived from
+# the Dockerfile rather than hardcoded here, so a new COPY is caught by this test instead of by an operator
+# waiting on a build.
+while IFS= read -r p; do
+  grep -qE "^!${p%%/*}$" .dockerignore \
+    || fail ".dockerignore does not re-include '$p', which $DOCKERFILE COPYs. The image build would fail on a missing file."
+done < <(grep -E '^COPY ' "$DOCKERFILE" | awk '{print $2}' | grep -vE '^--from' | grep -vE '^\./?$')
+ok ".dockerignore re-includes every path the Dockerfile copies"
+
+# data/ is the whole point: gitignored, copied by no layer, and the same artifact the job downloads from
+# blob storage inside Azure minutes later.
+if grep -qE '^!data' .dockerignore; then
+  fail ".dockerignore re-includes data/. That is the 3.8 GB the operator was waiting on; the job reads the artifact from blob storage, not from the image."
+fi
+ok ".dockerignore keeps the artifact out of the build context"
+
+# --start-only must REFUSE on a missing premise rather than fall back. A fallback would make the flag mean
+# "usually fast", and the one run that silently built would be the run on the connection that could not
+# afford it.
+grep -q '\-\-start-only) START_ONLY=true' "$SCRIPT" \
+  || fail "$SCRIPT must accept --start-only, so a load can be started without the uploads that put its inputs in Azure."
+grep -q 'start-only was passed, but \$ACR holds no cmms-load' "$SCRIPT" \
+  || fail "$SCRIPT must REFUSE --start-only when the registry lacks the tag. Falling back to a build defeats the flag on exactly the connection that needed it."
+grep -q 'start-only was passed, but artifact/\${PROFILE}/ holds no blobs' "$SCRIPT" \
+  || fail "$SCRIPT must REFUSE --start-only when nothing is staged under the profile's prefix. An empty prefix matches an empty local directory at zero and would otherwise pass."
+ok "$SCRIPT refuses --start-only rather than falling back to a build or an empty prefix"
+
+# The staged-versus-local comparison must not fire when there is no local copy. An absent directory counts
+# as zero files, which differs from a staged 587, so the run died claiming the staged copy was not this
+# artifact and advising a re-run without SKIP_UPLOAD=1. That is the wrong fix for a state that is not
+# wrong: --start-only exists so a load can be started from inputs already in Azure, and keeping 3.8 GB on
+# the laptop is not a precondition for that.
+grep -q 'if \[ -d "\$ARTIFACT_DIR" \] && \[ "\$STAGED_FILES" != "?" \]' "$SCRIPT" \
+  || fail "$SCRIPT compares staged blobs against a local artifact directory without first checking the directory exists. With --start-only there may be no local copy, and a missing one counts as zero files, which refuses the run for the state it was designed to support."
+ok "$SCRIPT compares against the local artifact only when there is one"
+
+# The fast path must not be the path with fewer checks. These three assertions run on every route through
+# the script, and --start-only skips preparation rather than verification.
+for guard in 'Refusing to start it: a stale image would run code you are not looking at' \
+             'Refusing to start it: it would load whatever is at that address' \
+             'This script does not delete data and will not start a job that does'; do
+  grep -qF "$guard" "$SCRIPT" \
+    || fail "$SCRIPT lost the assertion: $guard. --start-only skips work that is already done, never a check."
+done
+ok "$SCRIPT keeps the image, profile and delete assertions on every path"
 
 echo
 echo "PASS: load delivery conformance"

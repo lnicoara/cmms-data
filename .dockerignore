@@ -1,0 +1,44 @@
+# Build context for tools/Cmms.LoadDataRunner/Dockerfile. lnicoara/cmms-data#14.
+#
+# `az acr build` builds remotely, so everything not excluded here is UPLOADED before the build can start.
+# Without this file that was the whole working tree: 4.2 GB to deliver the ~3.5 MB the Dockerfile copies.
+# Measured on 2026-08-11, an operator on a coffee-shop connection abandoned a load after an hour with no
+# ACR build yet queued, while every build in that registry's history finished in under three minutes. The
+# upload was the entire wait.
+#
+# The worst of it was data/, at 3.8 GB: gitignored, copied by no layer, and holding the same artifact the
+# job downloads from blob storage inside Azure a few minutes later. tools/*/bin was the sharper problem at
+# 83 MB, because it exists only after a local `dotnet build`, so the context grew once an operator had
+# built the solution and never shrank back.
+#
+# ALLOWLIST, not a list of things to exclude, and that choice is the point of the file. A denylist is
+# correct on the day it is written and silently wrong afterwards: the next directory somebody adds is
+# uploaded again, and nothing reports it because a slow upload looks exactly like a slow connection. With
+# `*` first, a path the Dockerfile COPYs and this file does not name fails the build immediately, naming
+# the missing file. Loud at build time beats a gigabyte nobody can see.
+#
+# Keep this list in step with the COPY lines in tools/Cmms.LoadDataRunner/Dockerfile.
+
+*
+
+# MSBuild walks up from the project for this, so it has to sit at the context root (TreatWarningsAsErrors).
+!Directory.Build.props
+# The SDK pin, so the image cannot compile under a different SDK policy than the repo. lnicoara/cmms#1437.
+!global.json
+# Which source Cmms.* resolves from, and the mapping that stops anything else answering for it.
+!nuget.config
+# Cmms.Domain, Cmms.Application and Cmms.Infrastructure at the pinned commit, packed into the context by
+# load-pre-prod.sh moments before the build. There is no feed and therefore no credential, so these files
+# ARE the supply chain and excluding them breaks the restore rather than slowing it.
+!.packages
+# The generator project links ../../profiles/*.json into its output, and a restore fails on a link whose
+# source is absent.
+!profiles
+# The runner and generator sources.
+!tools
+
+# Build output under the allowed trees. The image runs its own restore and publish, so shipping a local
+# `dotnet build`'s output means uploading 83 MB for the Dockerfile to ignore and rebuild. Excluded AFTER
+# !tools because later patterns win.
+tools/**/bin
+tools/**/obj
