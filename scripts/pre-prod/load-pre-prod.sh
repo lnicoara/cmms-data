@@ -576,7 +576,13 @@ fact "local" "$LOCAL_FILES file(s) in $ARTIFACT_DIR"
 if [ "$START_ONLY" = "true" ] && { [ "$STAGED_FILES" = "?" ] || [ "$STAGED_FILES" -eq 0 ] 2>/dev/null; }; then
   die "--start-only was passed, but artifact/${PROFILE}/ holds no blobs. There is nothing staged to load. Re-run without --start-only to upload '$PROFILE' first."
 fi
-if [ "$STAGED_FILES" != "?" ] && [ "$STAGED_FILES" != "$LOCAL_FILES" ]; then
+# Compared only when there IS a local copy to compare against. An absent directory counts as zero files,
+# which differs from a staged 587 and read as "the staged copy is not this artifact", so the run died
+# advising a re-run without SKIP_UPLOAD=1: the wrong fix, for a state that is not wrong. Holding 3.8 GB on
+# the laptop is not a precondition for starting a job whose inputs are already in Azure, and under
+# --start-only it is the normal case not to have it. The empty-prefix refusal above is what covers the
+# state this one used to be relied on for.
+if [ -d "$ARTIFACT_DIR" ] && [ "$STAGED_FILES" != "?" ] && [ "$STAGED_FILES" != "$LOCAL_FILES" ]; then
   die "artifact/${PROFILE}/ holds $STAGED_FILES blob(s) but '$ARTIFACT_DIR' holds $LOCAL_FILES file(s). The staged copy is not this artifact, and the job would load whatever is actually there. Re-run without SKIP_UPLOAD=1."
 fi
 

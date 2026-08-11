@@ -838,6 +838,15 @@ grep -q 'start-only was passed, but artifact/\${PROFILE}/ holds no blobs' "$SCRI
   || fail "$SCRIPT must REFUSE --start-only when nothing is staged under the profile's prefix. An empty prefix matches an empty local directory at zero and would otherwise pass."
 ok "$SCRIPT refuses --start-only rather than falling back to a build or an empty prefix"
 
+# The staged-versus-local comparison must not fire when there is no local copy. An absent directory counts
+# as zero files, which differs from a staged 587, so the run died claiming the staged copy was not this
+# artifact and advising a re-run without SKIP_UPLOAD=1. That is the wrong fix for a state that is not
+# wrong: --start-only exists so a load can be started from inputs already in Azure, and keeping 3.8 GB on
+# the laptop is not a precondition for that.
+grep -q 'if \[ -d "\$ARTIFACT_DIR" \] && \[ "\$STAGED_FILES" != "?" \]' "$SCRIPT" \
+  || fail "$SCRIPT compares staged blobs against a local artifact directory without first checking the directory exists. With --start-only there may be no local copy, and a missing one counts as zero files, which refuses the run for the state it was designed to support."
+ok "$SCRIPT compares against the local artifact only when there is one"
+
 # The fast path must not be the path with fewer checks. These three assertions run on every route through
 # the script, and --start-only skips preparation rather than verification.
 for guard in 'Refusing to start it: a stale image would run code you are not looking at' \
