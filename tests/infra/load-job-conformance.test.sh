@@ -844,11 +844,19 @@ ok ".dockerignore keeps the artifact out of the build context"
 # afford it.
 grep -q '\-\-start-only) START_ONLY=true' "$SCRIPT" \
   || fail "$SCRIPT must accept --start-only, so a load can be started without the uploads that put its inputs in Azure."
-grep -q 'start-only was passed, but \$ACR holds no cmms-load' "$SCRIPT" \
-  || fail "$SCRIPT must REFUSE --start-only when the registry lacks the tag. Falling back to a build defeats the flag on exactly the connection that needed it."
-grep -q 'start-only was passed, but artifact/\${PROFILE}/ holds no blobs' "$SCRIPT" \
-  || fail "$SCRIPT must REFUSE --start-only when nothing is staged under the profile's prefix. An empty prefix matches an empty local directory at zero and would otherwise pass."
-ok "$SCRIPT refuses --start-only rather than falling back to a build or an empty prefix"
+# The two premises are answered DIFFERENTLY, by cost, and that asymmetry is the rule worth pinning.
+#
+# A missing image is built. It once refused, back when a build meant uploading the whole working tree; with
+# the context down to ~3.5 MB it is about three minutes, and refusing to spend them broke the ordinary
+# command on every new commit, because IMAGE_TAG is HEAD's short sha and an unbuilt commit has no tag.
+# A missing artifact still stops the run, because uploading is the multi-gigabyte operation that has to
+# stay off an operator's connection unless they asked for it with --prepare.
+if grep -q 'start-only was passed, but \$ACR holds no cmms-load' "$SCRIPT"; then
+  fail "$SCRIPT refuses to build a missing image. Since the .dockerignore that is now a three-minute build, and refusing it breaks the bare command on every new commit."
+fi
+grep -q 'holds no blobs, so there is nothing staged' "$SCRIPT" \
+  || fail "$SCRIPT must stop when nothing is staged under the profile's prefix. An empty prefix matches an empty local directory at zero and would otherwise start a job that fails inside the container."
+ok "$SCRIPT builds a missing image but stops on a missing artifact"
 
 # The staged-versus-local comparison must not fire when there is no local copy. An absent directory counts
 # as zero files, which differs from a staged 587, so the run died claiming the staged copy was not this

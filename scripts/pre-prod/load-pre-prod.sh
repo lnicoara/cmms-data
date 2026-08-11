@@ -515,9 +515,15 @@ if [ "$START_ONLY" = "true" ]; then
   STORE=$(az storage account list -g "$RG" \
     --query "[?starts_with(name,'stloadtest')].name | [0]" -o tsv 2>/dev/null) \
     || die "could not list storage accounts in $RG."
-  [ -n "$STORE" ] && [ "$STORE" != "None" ] \
-    || die "no stloadtest* storage account in $RG, so nothing has ever been staged here. Run without --start-only once to create it."
-else
+  # Falls through to the deploy rather than refusing. The account not existing is a first-run state, not an
+  # operator error, and answering it with "re-run with a different flag" makes the ordinary command wrong
+  # exactly once per environment, at the moment somebody is least equipped to know why.
+  if [ -z "$STORE" ] || [ "$STORE" = "None" ]; then
+    note "no stloadtest* account in $RG yet; deploying it"
+    START_ONLY=false
+  fi
+fi
+if [ "$START_ONLY" != "true" ]; then
   step "Deploying the load-test store (infra/modules/load-test-store.bicep)"
   # Idempotent: re-deploying converges the account, its two containers, the role assignment, and the private
   # endpoint. privateLink matches pre-prod's locked posture.
@@ -594,12 +600,14 @@ STAGED_FILES=$(az storage blob list --account-name "$STORE" -c artifact --prefix
   --auth-mode login --query "length(@)" -o tsv 2>/dev/null || echo "?")
 fact "staged" "$STAGED_FILES blob(s) under artifact/${PROFILE}/"
 fact "local" "$LOCAL_FILES file(s) in $ARTIFACT_DIR"
-# An EMPTY prefix is its own failure, and it is the one --start-only can actually cause. The comparison
-# below only fires when the two counts differ, so a prefix holding nothing against a machine holding
-# nothing agrees at zero and passes. That is fine when the upload just ran; under --start-only it would
-# mean starting a job whose whole premise is a dataset that is not there.
-if [ "$START_ONLY" = "true" ] && { [ "$STAGED_FILES" = "?" ] || [ "$STAGED_FILES" -eq 0 ] 2>/dev/null; }; then
-  die "--start-only was passed, but artifact/${PROFILE}/ holds no blobs. There is nothing staged to load. Re-run without --start-only to upload '$PROFILE' first."
+# An EMPTY prefix still has to stop the run, because starting a job whose whole premise is a staged dataset
+# that is not there would fail minutes later inside the container with a message only Log Analytics holds.
+# It is a die rather than a fallback upload for one reason: uploading is the multi-gigabyte operation this
+# work exists to keep off an operator's connection unless they asked for it. The image build below is the
+# opposite case and is handled the opposite way, because three minutes is worth spending and hours are not.
+if [ "$STAGED_FILES" = "?" ] || { [ "$STAGED_FILES" -eq 0 ] 2>/dev/null; }; then
+  die "artifact/${PROFILE}/ holds no blobs, so there is nothing staged for the job to read. Upload it first:
+    scripts/pre-prod/load-pre-prod.sh --prepare"
 fi
 # Compared only when there IS a local copy to compare against. An absent directory counts as zero files,
 # which differs from a staged 587 and read as "the staged copy is not this artifact", so the run died
@@ -611,22 +619,17 @@ if [ -d "$ARTIFACT_DIR" ] && [ "$STAGED_FILES" != "?" ] && [ "$STAGED_FILES" != 
   die "artifact/${PROFILE}/ holds $STAGED_FILES blob(s) but '$ARTIFACT_DIR' holds $LOCAL_FILES file(s). The staged copy is not this artifact, and the job would load whatever is actually there. Re-run without SKIP_UPLOAD=1."
 fi
 
-if [ "$START_ONLY" = "true" ]; then
-  # REFUSES rather than builds. Falling back to a build here would make --start-only mean "usually fast",
-  # and the one run where it silently built would be the run on the connection that could not afford it.
-  # The digest resolution immediately below is what proves the tag is really there; this only makes the
-  # failure name the flag and the fix.
-  step "Load image $ACR/cmms-load:$IMAGE_TAG (--start-only: not building)"
-  FOUND=$(image_digest cmms-load)
-  case "$FOUND" in
-    sha256:*) ok "${IMAGE_TAG} already in $ACR" ;;
-    *) die "--start-only was passed, but $ACR holds no cmms-load:$IMAGE_TAG to start. Nothing was built and nothing was deployed.
-    A dirty working tree gets a -dirty-<hash> tag that has never been built, so commit first, or re-run without --start-only to build it." ;;
-  esac
-else
-  step "Load image $ACR/cmms-load:$IMAGE_TAG"
-  build_if_absent cmms-load tools/Cmms.LoadDataRunner/Dockerfile
-fi
+# BUILDS WHEN THE TAG IS MISSING, on every path, and build_if_absent is already the thing that skips the
+# build when the registry has it. There is no fast-path variant of this step any more.
+#
+# It used to REFUSE under --start-only, on the reasoning that a surprise build was a surprise 4.2 GB
+# upload and an hour of somebody's tethered connection. The .dockerignore removed that: the context is
+# ~3.5 MB and the build is about three minutes. What the refusal actually did once --start-only became the
+# default was break the ordinary command on every new commit, because IMAGE_TAG is HEAD's short sha and a
+# commit nobody has built yet has no tag in the registry. Refusing to spend three minutes, and telling the
+# operator to re-run with a different flag, is worse than spending them.
+step "Load image $ACR/cmms-load:$IMAGE_TAG"
+build_if_absent cmms-load tools/Cmms.LoadDataRunner/Dockerfile
 
 # Deploy by DIGEST, not by tag. A tag is a mutable pointer, so "the job runs cmms-load:abc123" is a
 # statement about a name rather than about any particular image. Resolving it here means the thing that
