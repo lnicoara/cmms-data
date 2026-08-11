@@ -100,6 +100,83 @@ public class PlanAndReaderTests : IDisposable
         Assert.Equal(first, second);
     }
 
+    // AuditEvents is 344 of the full artifact's 584 chunks and 34.4M of its 42.7M rows, and it has no
+    // foreign keys, so Kahn puts it in the first dependency round where the alphabetical tie-break lands it
+    // near the front. At the rate measured on 2026-08-10 that is roughly 63 hours before the second table
+    // starts, with everything an operator would query queued behind the least interesting 80% of the rows.
+    [Fact]
+    public void Loads_AuditEvents_last()
+    {
+        var order = BuildPlan("deferred").Tables.Select(t => t.Table).ToList();
+
+        Assert.Contains("AuditEvents", order);
+        Assert.Equal("AuditEvents", order[^1]);
+    }
+
+    // The property the deferral rests on, asserted against the MODEL rather than against the plan, so this
+    // fails the day someone gives AuditEvent a relationship even if nothing else notices. An audit row names
+    // its subject by the EntityType and EntityId strings on purpose: it has to outlive the row it describes,
+    // which is what an append-only Part 11 trail is for.
+    [Fact]
+    public void AuditEvents_has_no_foreign_key_in_either_direction()
+    {
+        var et = _model.EntityTypeForTable("AuditEvents");
+        Assert.NotNull(et);
+
+        var outbound = et!.GetForeignKeys()
+            .Select(fk => fk.PrincipalEntityType.GetTableName())
+            .Where(p => p is not null && !string.Equals(p, "AuditEvents", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        Assert.True(!outbound.Any(),
+            "AuditEvents now references " + string.Join(", ", outbound) +
+            ", so its load position is a real constraint and it may no longer be deferred");
+
+        var inbound = _model.AllTableNames()
+            .Where(t => !string.Equals(t, "AuditEvents", StringComparison.OrdinalIgnoreCase))
+            .Where(t => _model.EntityTypeForTable(t)?.GetForeignKeys()
+                .Any(fk => string.Equals(fk.PrincipalEntityType.GetTableName(), "AuditEvents",
+                    StringComparison.OrdinalIgnoreCase)) == true)
+            .ToList();
+        Assert.True(!inbound.Any(),
+            string.Join(", ", inbound) + " now reference AuditEvents, so it may no longer be deferred");
+    }
+
+    // Moving a table to the end must MOVE it, not drop it or leave a copy behind. A plan that quietly lost
+    // AuditEvents would load without error and simply never write 34.4M rows.
+    [Fact]
+    public void Deferring_a_table_neither_drops_nor_duplicates_any_table()
+    {
+        var artifact = Artifact.Open(ArtifactTests.Build(Path.Combine(_dir, "nodrop")));
+        var planned = LoadPlan.Build(artifact, _model).Tables.Select(t => t.Table).ToList();
+
+        Assert.Equal(artifact.Tables.Count, planned.Count);
+        Assert.Equal(artifact.Tables.Count, planned.Distinct(StringComparer.Ordinal).Count());
+        Assert.Empty(artifact.Tables.Except(planned, StringComparer.Ordinal));
+    }
+
+    // The deferral must not disturb the order it is layered on top of. Every dependency edge the sort
+    // established still has to hold after the move, which is the whole reason only an isolated node may be
+    // listed.
+    [Fact]
+    public void Deferring_preserves_every_dependency_edge()
+    {
+        var order = BuildPlan("edges").Tables.Select(t => t.Table).ToList();
+        var position = order.Select((t, i) => (t, i)).ToDictionary(x => x.t, x => x.i, StringComparer.OrdinalIgnoreCase);
+
+        var violations = new List<string>();
+        foreach (var table in order)
+        foreach (var fk in _model.EntityTypeForTable(table)!.GetForeignKeys().Where(fk => fk.IsRequired))
+        {
+            var principal = fk.PrincipalEntityType.GetTableName();
+            if (principal is null) continue;
+            if (string.Equals(principal, table, StringComparison.OrdinalIgnoreCase)) continue;
+            if (!position.TryGetValue(principal, out var at)) continue;
+            if (at > position[table]) violations.Add($"{table} loads before its parent {principal}");
+        }
+
+        Assert.True(!violations.Any(), string.Join("; ", violations));
+    }
+
     // The guard against loading an artifact across a migration boundary. A column the model gained since
     // generation would otherwise be inserted as its default with nobody told.
     [Fact]

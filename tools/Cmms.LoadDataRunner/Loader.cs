@@ -278,8 +278,8 @@ public sealed class Loader
                 // re-doing something that does not need doing.
                 //
                 // Seen on a real run at 10.7 million AuditEvents rows in, which is the shape of the
-                // problem: the further a load gets, the more it costs to abandon, and duplicates surface
-                // late because the big tables load last.
+                // problem: the further a load gets, the more it costs to abandon, and the tables big
+                // enough to get that far are the ones a run reaches hours in.
                 //
                 // NOT checkpointed as complete. A checkpoint means "this loader put these rows here", and
                 // that would be a lie the next resume acts on. Reported and counted instead, so a run that

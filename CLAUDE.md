@@ -123,6 +123,14 @@ free. A writer that rolled on compressed size would be v2, not a compatible chan
   Guids and at codes `CE`/`FE`, colliding on the primary key and on the unique `IX_ServiceLines_Code`. One of
   those Guids is inserted by a *migration* into every tenant database, so an unseeded tenant collided too.
   Both are seed-derived now. Any new hardcoded id or natural key is this bug again.
+- **Load order is derived from foreign keys, with exactly one exception.** `AuditEvents` loads LAST, because
+  it is 344 of the full artifact's 584 chunks and 34.4M of its 42.7M rows and the alphabetical tie-break put
+  it near the front of the first dependency round — roughly 63 hours before the second table started. It is
+  the only table that may be moved, because it is an isolated node: an audit row names its subject by the
+  `EntityType`/`EntityId` strings rather than by a relationship, so it has no foreign key in either direction.
+  `LoadPlan.Defer` proves that against the model on every build rather than trusting the list, since
+  SqlBulkCopy does not check constraints and a wrongly-deferred table writes dangling references silently.
+  Checkpoints carry no notion of sequence, so reordering does not disturb a resume.
 - **Reference cardinality does not scale down.** `small` and `full` carry identical reference and lookup
   tables. Volume scales; cardinality does not, because scaling reference data down makes indexes get ignored
   in favour of scans and the load test then measures scans where production seeks. The corollary: **`small`
